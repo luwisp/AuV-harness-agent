@@ -125,7 +125,18 @@ Action → [静态规则] → [风险评估] → [审批状态机] → [沙箱�
 - 每次循环记录一条 `TraceEntry`（JSONL），包含：轮次、消息快照、LLM 响应、解析动作、护栏决策、工具结果、反馈结果
 - 支持事后回放审计
 
-### 3.10 凭据管理
+### 3.10 交互式 TUI
+
+- **引擎**：基于 `ratatui` 的终端 UI
+- **视图**：
+  - 对话面板：显示 agent 与 LLM 的消息往来（流式渲染）
+  - 工具面板：显示当前正在执行的工具调用及结果
+  - 护栏面板：高亮显示审批请求，支持 y/n 交互
+  - 状态栏：当前轮次、token 使用量、风险等级
+- **交互**：Approval 状态机在 TUI 中以内联方式展示（高亮风险项，等待 y/n 输入）
+- **降级**：如果 TUI 无法启动（如管道重定向），自动降级为纯文本 CLI 模式
+
+### 3.11 凭据管理
 
 - **安全存储**：OS 钥匙串（Linux Secret Service / macOS Keychain / Windows Credential Manager）或带主密码的加密文件
 - **首次录入**：`rpassword` 隐藏输入引导
@@ -185,40 +196,73 @@ Action → [静态规则] → [风险评估] → [审批状态机] → [沙箱�
 
 ### 5.1 组件图
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    HarnessAgent                          │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐  │
-│  │  Config  │  │  Memory  │  │   Observability      │  │
-│  │  (rules) │  │  (file)  │  │   (tracing/audit)    │  │
-│  └────┬─────┘  └────┬─────┘  └──────────┬───────────┘  │
-│       │             │                    │               │
-│       └──────────┬──┴────────────────────┘               │
-│                  ▼                                       │
-│  ┌──────────────────────────────────────┐               │
-│  │         Agent Main Loop               │              │
-│  │  build_context → llm.complete()       │              │
-│  │  → parse_action → guardrail.check()   │              │
-│  │  → dispatch_tool → feedback.run()     │              │
-│  │  → stop? → loop                        │              │
-│  └───┬──────────┬──────────┬─────────────┘              │
-│      │          │          │                             │
-│  ┌───▼──┐  ┌────▼────┐ ┌──▼──────────┐                 │
-│  │ LLM  │  │Guardrail│ │ Tool Registry│                 │
-│  │Layer │  │Pipeline │ │ (files/bash/ │                 │
-│  │(mock │  │(rules/  │ │  grep/lsp/   │                 │
-│  │/real)│  │ approval│ │  git/test)   │                 │
-│  └──────┘  │ /sandbox│ └──────────────┘                 │
-│            │ /audit) │                                    │
-│            └─────────┘                                    │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────────┐     │
-│  │ Feedback │  │  Subagent    │  │  Credentials   │     │
-│  │  Runner  │  │  Spawner     │  │  (keyring/     │     │
-│  │(test/lint│  │  (isolate)   │  │   encrypted)   │     │
-│  │ /typeck) │  │              │  │                │     │
-│  └──────────┘  └──────────────┘  └────────────────┘     │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph HA[HarnessAgent]
+        direction TB
+
+        subgraph INFRA[Core Infrastructure]
+            direction LR
+            Config["Config<br/>(rules)"]
+            Memory["Memory<br/>(file)"]
+            Obs["Observability<br/>(tracing/audit)"]
+        end
+
+        subgraph LOOP[Agent Main Loop]
+            direction TB
+            Context["build_context"]
+            LLMCall["llm.complete()"]
+            Parse["parse_action"]
+            GuardCheck["guardrail.check()"]
+            Dispatch["dispatch_tool"]
+            Feedback["feedback.run()"]
+            Stop{"stop?"}
+            LoopBack["loop"]
+
+            Context --> LLMCall
+            LLMCall --> Parse
+            Parse --> GuardCheck
+            GuardCheck --> Dispatch
+            Dispatch --> Feedback
+            Feedback --> Stop
+            Stop -- "No" --> LoopBack
+            LoopBack --> Context
+            Stop -- "Yes" --> End["Finish"]
+        end
+
+
+        subgraph COMPONENTS[Runtime Components]
+            direction LR
+
+            LLM["LLM Layer<br/>(mock/real)"]
+
+            Guardrail["Guardrail Pipeline<br/>(rules/<br/>approval/<br/>sandbox/<br/>audit)"]
+
+            Tools["Tool Registry<br/>(files/bash/<br/>grep/lsp/<br/>git/test)"]
+
+            FeedbackRunner["Feedback Runner<br/>(test/lint/<br/>typeck)"]
+
+            Subagent["Subagent Spawner<br/>(isolate)"]
+
+            Credentials["Credentials<br/>(keyring/<br/>encrypted)"]
+        end
+
+
+        Config --> LOOP
+        Memory --> LOOP
+        Obs --> LOOP
+
+        LOOP --> LLM
+        LOOP --> Guardrail
+        LOOP --> Tools
+
+        Tools --> FeedbackRunner
+        Tools --> Subagent
+
+        Guardrail --> Credentials
+        Subagent --> Credentials
+
+    end
 ```
 
 ### 5.2 数据流
@@ -302,6 +346,15 @@ harnessAgent/
       mod.rs                  # CredentialManager
       keyring.rs              # KeyringCredentialBackend
       env.rs                  # EnvCredentialBackend
+    tui/
+      mod.rs                  # TUI 主入口
+      app.rs                  # App 状态管理
+      panels/
+        mod.rs                # 面板布局
+        conversation.rs       # 对话面板
+        tools.rs              # 工具面板
+        guardrails.rs         # 护栏/审批面板
+        status.rs             # 状态栏
 ```
 
 ---
@@ -453,6 +506,7 @@ harness key clear     # 删除存储的 key
 | **`serde` + `serde_json`** | JSON Schema 生成与解析 |
 | **`tokio`** | 异步运行时，支持并发 LLM 调用和子 agent |
 | **`clap`** | CLI 参数解析 |
+| **`ratatui`** | 终端 TUI 框架 |
 | **`tracing`** | 结构化日志框架 |
 
 ---
@@ -468,7 +522,8 @@ harness key clear     # 删除存储的 key
 7. **一键测试**：`cargo test` 运行所有单元测试（含 mock LLM 测试），不依赖网络
 8. **Docker 运行**：`docker build && docker run` 可启动
 9. **CI 通过**：GitHub Actions 中 `cargo test` + `cargo build --release` 全部通过
-10. **机制演示**：§A.6 的三项行为在 mock LLM 下可复现
+10. **TUI 交互**：`harness run` 启动 TUI，显示对话、工具调用、护栏审批面板
+11. **机制演示**：§A.6 的三项行为在 mock LLM 下可复现
 
 ---
 
@@ -485,7 +540,4 @@ harness key clear     # 删除存储的 key
 ## 12. Stretch Goals（时间允许时）
 
 1. MCP 客户端协议实现
-2. 更多 LLM 供应商（Ollama 本地模型）
-3. 技能系统的热加载（文件变更自动重载）
-4. 交互式 TUI（基于 `ratatui`）
-5. Web Dashboard（基于 `axum` + 前端）
+2. 技能系统的热加载（文件变更自动重载）
