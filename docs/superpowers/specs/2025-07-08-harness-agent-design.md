@@ -244,7 +244,7 @@ Action → [静态规则] → [风险评估] → [审批状态机] → [沙箱�
 
 ### 5.3 外部依赖
 
-- **LLM 供应商**：Anthropic Messages API（主要），OpenAI Chat Completions API（预留接口）
+- **LLM 供应商**：OpenAI Chat Completions API（主要），Anthropic Messages API（预留接口）
 - **OS 钥匙串**：`keyring` crate（跨平台凭据存储）
 - **LSP**：通过 `lsp-server` / `lsp-types` crate 与语言服务器通信
 - **Git**：通过 `git2` crate 或命令行调用
@@ -263,8 +263,8 @@ harnessAgent/
       skills.rs               # 技能文件解析
     llm/
       mod.rs                  # LlmProvider trait + 工厂
-      anthropic.rs            # Anthropic API 实现
-      openai.rs               # OpenAI API 实现（预留）
+      anthropic.rs            # Anthropic API 实现（预留）
+      openai.rs               # OpenAI API 实现
       mock.rs                 # MockLlmProvider
     loop/
       mod.rs                  # AgentLoop 主循环
@@ -446,8 +446,8 @@ harness key clear     # 删除存储的 key
 | 选择 | 理由 |
 |------|------|
 | **Rust** | 零成本抽象、trait 系统天然适合可注入的 mock 架构；静态编译适合二进制分发；类型系统在编译期拦截大量错误 |
-| **Anthropic API**（主要） | Claude 在编码任务上表现最优；Messages API 的 tool_use 格式规范清晰 |
-| **OpenAI API**（预留） | 兼容接口广，便于扩展 |
+| **OpenAI API**（主要） | 兼容接口最广，Chat Completions API 的 tool_calls 格式成熟，第三方服务（如 DeepSeek、Groq）广泛兼容 |
+| **Anthropic API**（预留） | Claude 在编码任务上表现优异，Messages API 的 tool_use 格式规范清晰 |
 | **`reqwest`** | Rust 生态最成熟的 HTTP 客户端 |
 | **`keyring`** | 跨平台 OS 钥匙串抽象 |
 | **`serde` + `serde_json`** | JSON Schema 生成与解析 |
@@ -474,7 +474,7 @@ harness key clear     # 删除存储的 key
 
 ## 11. 风险与未决问题
 
-1. **Anthropic API 速率限制**：课程演示时可能遇到 429。对策：mock LLM 演示机制，真实 API 调用保留但非必需。
+1. **OpenAI API 速率限制**：课程演示时可能遇到 429。对策：mock LLM 演示机制，真实 API 调用保留但非必需。
 2. **LSP 集成复杂度**：LSP 协议较复杂，可能在实现中简化。对策：可将 LSP 诊断通道降级为"解析 `cargo check` 输出"。
 3. **OS 钥匙串可用性**：Linux 下 Secret Service 不一定可用（无桌面环境）。对策：自动降级到加密文件方案。
 4. **子 agent 递归深度**：fork 炸弹风险。对策：硬编码深度上限 + 总 agent 数上限。
