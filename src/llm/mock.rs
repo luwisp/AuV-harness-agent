@@ -23,7 +23,7 @@ impl MockLlmProvider {
 impl LlmProvider for MockLlmProvider {
     async fn complete(&self, _messages: &[Message]) -> Result<LlmResponse, HarnessError> {
         let mut count = self.call_count.lock().unwrap();
-        let mut responses = self.responses.lock().unwrap();
+        let responses = self.responses.lock().unwrap();
         let idx = *count;
         *count += 1;
         if idx < responses.len() {

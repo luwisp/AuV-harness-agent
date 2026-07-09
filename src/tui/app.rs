@@ -1,5 +1,31 @@
 use crate::types::{Message, ToolResult};
 
+/// Which panel in the TUI has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    /// The conversation/messages panel.
+    #[default]
+    Conversation,
+    /// The tools panel.
+    Tools,
+    /// The guardrails/approval panel.
+    Guardrails,
+    /// The status bar.
+    Status,
+}
+
+impl Focus {
+    /// Cycle to the next focus target.
+    pub fn next(self) -> Self {
+        match self {
+            Focus::Conversation => Focus::Tools,
+            Focus::Tools => Focus::Guardrails,
+            Focus::Guardrails => Focus::Status,
+            Focus::Status => Focus::Conversation,
+        }
+    }
+}
+
 /// Represents a guardrail approval request displayed to the user in the TUI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalRequest {
@@ -85,6 +111,8 @@ pub struct AppState {
     pub status: StatusInfo,
     /// Whether the agent loop is still running.
     pub running: bool,
+    /// Which panel currently has keyboard focus.
+    pub focus: Focus,
 }
 
 impl AppState {
@@ -97,6 +125,7 @@ impl AppState {
             guard_requests: Vec::new(),
             status: StatusInfo::new(model),
             running: true,
+            focus: Focus::Conversation,
         }
     }
 
@@ -311,5 +340,33 @@ mod tests {
         );
         let cloned = req.clone();
         assert_eq!(req, cloned);
+    }
+
+    // -----------------------------------------------------------------------
+    // Focus tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_focus_default_is_conversation() {
+        assert_eq!(Focus::default(), Focus::Conversation);
+    }
+
+    #[test]
+    fn test_focus_cycles_through_all_panels() {
+        let mut focus = Focus::Conversation;
+        focus = focus.next();
+        assert_eq!(focus, Focus::Tools);
+        focus = focus.next();
+        assert_eq!(focus, Focus::Guardrails);
+        focus = focus.next();
+        assert_eq!(focus, Focus::Status);
+        focus = focus.next();
+        assert_eq!(focus, Focus::Conversation);
+    }
+
+    #[test]
+    fn test_app_state_has_focus_field() {
+        let state = AppState::new("gpt-4o");
+        assert_eq!(state.focus, Focus::Conversation);
     }
 }

@@ -43,6 +43,8 @@ impl RiskAssessment {
     /// # Examples
     ///
     /// ```
+    /// use harness_agent::guardrails::assessor::{RiskAssessment, RiskLevel};
+    ///
     /// let low = RiskAssessment::low();
     /// let medium = RiskAssessment { level: RiskLevel::Medium, reasons: vec!["pipe".into()], suggested_mitigation: None };
     /// let merged = low.merge(medium);
@@ -192,7 +194,7 @@ impl RiskAssessor for FileRiskAssessor {
         }
 
         // Path outside workspace → High
-        if is_outside_workspace(&path, context.working_directory.as_deref()) {
+        if is_outside_workspace(&path, &context.workspace_root) {
             reasons.push(format!(
                 "File path is outside workspace: {}",
                 path
@@ -373,15 +375,10 @@ fn is_system_directory(path: &str) -> bool {
 }
 
 /// Check if a path is outside the workspace root.
-fn is_outside_workspace(path: &str, workspace_root: Option<&std::path::Path>) -> bool {
-    let workspace = match workspace_root {
-        Some(w) => w,
-        None => return false,
-    };
-
+fn is_outside_workspace(path: &str, workspace_root: &std::path::Path) -> bool {
     let path = std::path::Path::new(path);
     if path.is_absolute() {
-        !path.starts_with(workspace)
+        !path.starts_with(workspace_root)
     } else {
         // Relative paths are considered inside the workspace
         false
@@ -478,15 +475,17 @@ mod tests {
 
     fn empty_context() -> GuardContext {
         GuardContext {
-            user: None,
-            working_directory: None,
+            session_id: "test-session".to_string(),
+            workspace_root: std::path::PathBuf::from("/home/user/project"),
+            user_id: None,
         }
     }
 
     fn ctx_with_workspace(path: &str) -> GuardContext {
         GuardContext {
-            user: None,
-            working_directory: Some(std::path::PathBuf::from(path)),
+            session_id: "test-session".to_string(),
+            workspace_root: std::path::PathBuf::from(path),
+            user_id: None,
         }
     }
 

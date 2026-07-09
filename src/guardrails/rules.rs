@@ -352,8 +352,9 @@ mod tests {
 
     fn empty_context() -> GuardContext {
         GuardContext {
-            user: None,
-            working_directory: None,
+            session_id: "test-session".to_string(),
+            workspace_root: std::path::PathBuf::from("/home/user/project"),
+            user_id: None,
         }
     }
 

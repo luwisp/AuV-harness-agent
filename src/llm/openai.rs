@@ -88,6 +88,7 @@ struct ResponseMessage {
 struct ResponseToolCall {
     id: String,
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     call_type: String,
     function: FunctionCallData,
 }
