@@ -1,6 +1,7 @@
 pub mod bash;
 pub mod context;
 pub mod file;
+pub mod search;
 
 use crate::error::{HarnessError, Result};
 use crate::types::{ToolInfo, ToolResult};
