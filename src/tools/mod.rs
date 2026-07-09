@@ -1,4 +1,5 @@
 pub mod context;
+pub mod file;
 
 use crate::error::{HarnessError, Result};
 use crate::types::{ToolInfo, ToolResult};
