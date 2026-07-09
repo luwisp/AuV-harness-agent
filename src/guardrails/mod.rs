@@ -1,3 +1,4 @@
+pub mod assessor;
 pub mod rules;
 
 /// Context passed to guardrail evaluation.
