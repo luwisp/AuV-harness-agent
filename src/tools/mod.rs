@@ -1,3 +1,4 @@
+pub mod bash;
 pub mod context;
 pub mod file;
 
