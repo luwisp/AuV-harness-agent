@@ -1,0 +1,6 @@
+target/
+.git/
+.memory/
+.harness/
+.env
+*.md
