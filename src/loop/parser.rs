@@ -48,7 +48,7 @@ impl ActionParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FinishReason, TokenUsage};
+    use crate::types::{FinishReason, TokenUsage, ToolCall};
 
     fn make_response(content: &str, tool_calls: Option<Vec<ToolCall>>) -> LlmResponse {
         LlmResponse {
