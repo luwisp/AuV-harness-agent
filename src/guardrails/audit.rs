@@ -9,6 +9,7 @@
 use chrono::Utc;
 use serde::Serialize;
 use std::io::Write;
+use crate::error::Result;
 
 // ============================================================================
 // AuditEntry
@@ -59,7 +60,7 @@ pub struct AuditEntry {
 ///     approver: None,
 ///     reasons: vec![],
 /// };
-/// log.record(entry);
+/// log.record(entry).unwrap();
 /// assert_eq!(log.get_entries().len(), 1);
 /// ```
 pub struct AuditLog {
@@ -83,27 +84,30 @@ impl AuditLog {
     /// Record an audit entry.
     ///
     /// The entry is appended to the in-memory list and immediately written
-    /// to the JSONL file.  If the write fails, the error is silently ignored
-    /// (the entry is still kept in memory).
-    pub fn record(&mut self, entry: AuditEntry) {
+    /// to the JSONL file.  Returns an error if the write fails.
+    pub fn record(&mut self, entry: AuditEntry) -> Result<()> {
         // Serialize to JSON line
         let line = serde_json::to_string(&entry).unwrap_or_else(|_| {
-            // Fallback: produce a minimal valid JSON line so the file format
-            // stays consistent even if serialization fails.
             r#"{"error":"failed to serialize audit entry"}"#.to_string()
         });
 
-        // Append to file immediately
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.output)
-        {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
+        // Ensure parent directory exists
+        if let Some(parent) = self.output.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
 
+        // Append to file immediately
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.output)?;
+        writeln!(file, "{line}")?;
+        file.flush()?;
+
         self.entries.push(entry);
+        Ok(())
     }
 
     /// Return a reference to all recorded entries (in order).
@@ -145,7 +149,7 @@ mod tests {
 
         let mut log = AuditLog::new(file_path.clone());
         let entry = sample_entry("s1", "bash: cargo test");
-        log.record(entry);
+        log.record(entry).unwrap();
 
         // Verify in-memory entries
         assert_eq!(log.get_entries().len(), 1);
@@ -189,7 +193,7 @@ mod tests {
 
         for (i, summary) in summaries.iter().enumerate() {
             let entry = sample_entry(&format!("s{i}"), summary);
-            log.record(entry);
+            log.record(entry).unwrap();
         }
 
         // Verify in-memory entries
@@ -233,7 +237,7 @@ mod tests {
         let before = Utc::now();
         let mut log = AuditLog::new(file_path.clone());
         let entry = sample_entry("s1", "bash: echo hello");
-        log.record(entry);
+        log.record(entry).unwrap();
         let after = Utc::now();
 
         // Verify in-memory entry has timestamp

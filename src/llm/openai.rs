@@ -157,12 +157,27 @@ fn parse_tool_calls(tool_calls: Option<Vec<ResponseToolCall>>) -> Option<Vec<Too
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn complete(&self, messages: &[Message]) -> Result<LlmResponse, HarnessError> {
+    async fn complete(&self, messages: &[Message], tools: &[crate::types::ToolInfo]) -> Result<LlmResponse, HarnessError> {
+        let openai_tools: Option<Vec<serde_json::Value>> = if tools.is_empty() {
+            None
+        } else {
+            Some(tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            }).collect())
+        };
+
         let request = ChatRequest {
             model: self.model.clone(),
             messages: messages_to_chat_messages(messages),
-            tools: None,
-            tool_choice: None,
+            tools: openai_tools,
+            tool_choice: if tools.is_empty() { None } else { Some("auto".to_string()) },
             max_tokens: 4096,
             temperature: 0.7,
         };
@@ -255,7 +270,7 @@ mod tests {
             tool_call_id: None,
         }];
 
-        let response = provider.complete(&messages).await.unwrap();
+        let response = provider.complete(&messages, &[]).await.unwrap();
         assert_eq!(response.content, "Hello from OpenAI!");
         assert_eq!(response.finish_reason, FinishReason::Stop);
         assert_eq!(response.usage.total_tokens, 15);
@@ -301,7 +316,7 @@ mod tests {
             tool_call_id: None,
         }];
 
-        let response = provider.complete(&messages).await.unwrap();
+        let response = provider.complete(&messages, &[]).await.unwrap();
         assert_eq!(response.finish_reason, FinishReason::ToolCalls);
         assert!(response.tool_calls.is_some());
 
@@ -335,7 +350,7 @@ mod tests {
             tool_call_id: None,
         }];
 
-        let result = provider.complete(&messages).await;
+        let result = provider.complete(&messages, &[]).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             HarnessError::Auth(_) => {} // expected

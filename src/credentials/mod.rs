@@ -36,7 +36,7 @@ impl CredentialManager {
     }
 
     /// Interactively prompt for a key name and its value, then store via the backend.
-    pub fn key_set(&self) -> Result<()> {
+    pub async fn key_set(&self) -> Result<()> {
         use std::io::{self, Write};
 
         let mut key_name = String::new();
@@ -60,19 +60,15 @@ impl CredentialManager {
             return Err(HarnessError::Credential("Value cannot be empty".to_string()));
         }
 
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| HarnessError::Credential(format!("Failed to create runtime: {}", e)))?;
-        rt.block_on(self.backend.set(&key_name, &password))?;
+        self.backend.set(&key_name, &password).await?;
 
         eprintln!("Credential '{}' stored successfully.", key_name);
         Ok(())
     }
 
     /// Remove a stored credential by key name.
-    pub fn key_clear(&self, key: &str) -> Result<()> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| HarnessError::Credential(format!("Failed to create runtime: {}", e)))?;
-        rt.block_on(self.backend.delete(key))?;
+    pub async fn key_clear(&self, key: &str) -> Result<()> {
+        self.backend.delete(key).await?;
         Ok(())
     }
 }
@@ -177,7 +173,7 @@ mod tests {
         let keys = manager.backend.list_keys().unwrap();
         assert!(keys.contains(&"test_key".to_string()));
 
-        manager.key_clear("test_key").unwrap();
+        rt.block_on(manager.key_clear("test_key")).unwrap();
 
         let keys = manager.backend.list_keys().unwrap();
         assert!(!keys.contains(&"test_key".to_string()));

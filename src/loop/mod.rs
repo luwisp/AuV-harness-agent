@@ -118,8 +118,9 @@ impl AgentLoop {
 
         // 3. Main loop
         for turn in 0..max_turns {
-            // a. Call LLM
-            let response = self.llm.complete(&messages).await?;
+            // a. Call LLM with tools
+            let tool_list = self.tools.list_tools();
+            let response = self.llm.complete(&messages, &tool_list).await?;
             tokens_used += response.usage.total_tokens;
 
             // b. Parse response into action
@@ -369,6 +370,7 @@ mod tests {
     fn minimal_context_builder() -> ContextBuilder {
         ContextBuilder::new(
             "You are a test agent. When done, start with FINAL ANSWER:".to_string(),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),

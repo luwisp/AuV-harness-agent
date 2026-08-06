@@ -7,6 +7,7 @@ use crate::types::{Message, Role};
 /// - A system prompt (configurable, or a sensible default)
 /// - A tool menu listing available tools and their descriptions
 /// - Project rules loaded from rule files
+/// - Skill descriptions loaded from the skills directory
 /// - A compact memory index from the persistent memory store
 /// - The user's task
 /// - The existing conversation history (previous assistant/tool messages)
@@ -14,6 +15,7 @@ pub struct ContextBuilder {
     system_prompt: String,
     tool_menu: String,
     rules_fragment: String,
+    skills_fragment: String,
     memory_index: String,
 }
 
@@ -26,12 +28,14 @@ impl ContextBuilder {
         system_prompt: String,
         tool_menu: String,
         rules_fragment: String,
+        skills_fragment: String,
         memory_index: String,
     ) -> Self {
         Self {
             system_prompt,
             tool_menu,
             rules_fragment,
+            skills_fragment,
             memory_index,
         }
     }
@@ -45,6 +49,7 @@ impl ContextBuilder {
         config: &HarnessConfig,
         tool_menu: String,
         rules_fragment: String,
+        skills_fragment: String,
         memory_index: String,
     ) -> Self {
         let system_prompt = config
@@ -57,6 +62,7 @@ impl ContextBuilder {
             system_prompt,
             tool_menu,
             rules_fragment,
+            skills_fragment,
             memory_index,
         }
     }
@@ -80,6 +86,11 @@ impl ContextBuilder {
 
         if !self.rules_fragment.is_empty() {
             system_content.push_str(&self.rules_fragment);
+        }
+
+        if !self.skills_fragment.is_empty() {
+            system_content.push_str("\n\n## Available Skills\n");
+            system_content.push_str(&self.skills_fragment);
         }
 
         if !self.memory_index.is_empty() {
@@ -133,7 +144,8 @@ mod tests {
             "You are a helpful assistant.".to_string(),
             "- bash: run shell commands\n- read_file: read a file".to_string(),
             "\n\n## Rules (MUST follow):\n- Always use async/await\n".to_string(),
-            "rust-style — Rust coding style guide\n".to_string(),
+            "\n\n## Skills\n- rust-style — Rust coding style guide\n".to_string(),
+            "fix-bug-123 — Fixed login bug in auth.rs\n".to_string(),
         )
     }
 
@@ -201,6 +213,7 @@ mod tests {
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
         );
 
         let messages = builder.build(&[], "hello");
@@ -231,6 +244,7 @@ mod tests {
             &config,
             "tool menu".to_string(),
             "rules".to_string(),
+            String::new(),
             "memory".to_string(),
         );
 
@@ -244,6 +258,7 @@ mod tests {
         let builder = ContextBuilder::from_config(
             &config,
             "tool menu".to_string(),
+            String::new(),
             String::new(),
             String::new(),
         );

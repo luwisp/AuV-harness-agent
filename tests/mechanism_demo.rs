@@ -347,6 +347,7 @@ async fn demo_feedback_loop_drives_correction() {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     );
 
     let mut agent = AgentLoop::new(

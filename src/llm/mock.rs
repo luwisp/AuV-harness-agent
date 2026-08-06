@@ -21,7 +21,7 @@ impl MockLlmProvider {
 
 #[async_trait]
 impl LlmProvider for MockLlmProvider {
-    async fn complete(&self, _messages: &[Message]) -> Result<LlmResponse, HarnessError> {
+    async fn complete(&self, _messages: &[Message], _tools: &[crate::types::ToolInfo]) -> Result<LlmResponse, HarnessError> {
         let mut count = self.call_count.lock().unwrap();
         let responses = self.responses.lock().unwrap();
         let idx = *count;
@@ -62,11 +62,11 @@ mod tests {
         let mock = MockLlmProvider::new(responses);
         let empty_messages: Vec<Message> = vec![];
 
-        let r1 = mock.complete(&empty_messages).await.unwrap();
+        let r1 = mock.complete(&empty_messages, &[]).await.unwrap();
         assert_eq!(r1.content, "first");
         assert_eq!(r1.finish_reason, FinishReason::Stop);
 
-        let r2 = mock.complete(&empty_messages).await.unwrap();
+        let r2 = mock.complete(&empty_messages, &[]).await.unwrap();
         assert_eq!(r2.content, "second");
         assert_eq!(r2.finish_reason, FinishReason::Stop);
 
@@ -78,7 +78,7 @@ mod tests {
         let mock = MockLlmProvider::new(vec![]);
         let empty_messages: Vec<Message> = vec![];
 
-        let r = mock.complete(&empty_messages).await.unwrap();
+        let r = mock.complete(&empty_messages, &[]).await.unwrap();
         assert_eq!(r.content, "Done");
         assert_eq!(r.finish_reason, FinishReason::Stop);
         assert_eq!(r.usage, TokenUsage::default());
@@ -102,7 +102,7 @@ mod tests {
         let mock = MockLlmProvider::new(vec![response]);
         let empty_messages: Vec<Message> = vec![];
 
-        let r = mock.complete(&empty_messages).await.unwrap();
+        let r = mock.complete(&empty_messages, &[]).await.unwrap();
         assert_eq!(r.finish_reason, FinishReason::ToolCalls);
         assert!(r.tool_calls.is_some());
 

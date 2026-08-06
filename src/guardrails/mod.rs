@@ -105,7 +105,7 @@ impl GuardrailPipeline {
                 result = ?rule_result,
                 "GuardrailPipeline[L1]: static rule denied action"
             );
-            self.audit.record(AuditEntry {
+            let _ = self.audit.record(AuditEntry {
                 timestamp: Utc::now(),
                 session_id: ctx.session_id.clone(),
                 action_summary: action_summary(action),
@@ -172,7 +172,7 @@ impl GuardrailPipeline {
                         reason = ?reason,
                         "GuardrailPipeline[L3]: action approved"
                     );
-                    self.audit.record(AuditEntry {
+                    let _ = self.audit.record(AuditEntry {
                         timestamp: Utc::now(),
                         session_id: ctx.session_id.clone(),
                         action_summary: action_summary(action),
@@ -188,7 +188,7 @@ impl GuardrailPipeline {
                         reason = %reason,
                         "GuardrailPipeline[L3]: action denied by user"
                     );
-                    self.audit.record(AuditEntry {
+                    let _ = self.audit.record(AuditEntry {
                         timestamp: Utc::now(),
                         session_id: ctx.session_id.clone(),
                         action_summary: action_summary(action),
@@ -207,7 +207,7 @@ impl GuardrailPipeline {
                         session_id = %ctx.session_id,
                         "GuardrailPipeline[L3]: approval timed out"
                     );
-                    self.audit.record(AuditEntry {
+                    let _ = self.audit.record(AuditEntry {
                         timestamp: Utc::now(),
                         session_id: ctx.session_id.clone(),
                         action_summary: action_summary(action),
@@ -233,7 +233,7 @@ impl GuardrailPipeline {
                 violation_type = ?violation.violation_type,
                 "GuardrailPipeline[L4]: sandbox violation"
             );
-            self.audit.record(AuditEntry {
+            let _ = self.audit.record(AuditEntry {
                 timestamp: Utc::now(),
                 session_id: ctx.session_id.clone(),
                 action_summary: action_summary(action),
@@ -253,7 +253,7 @@ impl GuardrailPipeline {
             session_id = %ctx.session_id,
             "GuardrailPipeline: action allowed"
         );
-        self.audit.record(AuditEntry {
+        let _ = self.audit.record(AuditEntry {
             timestamp: Utc::now(),
             session_id: ctx.session_id.clone(),
             action_summary: action_summary(action),

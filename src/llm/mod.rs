@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use crate::types::{Message, LlmResponse};
+use crate::types::{Message, LlmResponse, ToolInfo};
 use crate::error::HarnessError;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn complete(&self, messages: &[Message]) -> Result<LlmResponse, HarnessError>;
+    async fn complete(&self, messages: &[Message], tools: &[ToolInfo]) -> Result<LlmResponse, HarnessError>;
 }
 
 pub mod mock;

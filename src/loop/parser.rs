@@ -8,10 +8,11 @@ use crate::error::HarnessError;
 ///
 /// 1. If the response carries `tool_calls` (native function-calling), the
 ///    first tool call is parsed into `Action::ToolCall`.
-/// 2. If the response content starts with `"FINAL ANSWER:"`, the remainder
+/// 2. XML-style: `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`
+/// 3. LangChain-style: `Action: <name>\nAction Input: <json>`
+/// 4. If the response content starts with `"FINAL ANSWER:"`, the remainder
 ///    is treated as `Action::FinalAnswer`.
-/// 3. Otherwise the entire content is returned as `Action::FinalAnswer`
-///    (the LLM provided a direct answer without tool calls).
+/// 5. Otherwise the entire content is returned as `Action::FinalAnswer`.
 pub struct ActionParser;
 
 impl ActionParser {
@@ -30,17 +31,78 @@ impl ActionParser {
             }
         }
 
-        // 2. Content-based "FINAL ANSWER:" marker
-        let trimmed = response.content.trim();
-        if let Some(after) = trimmed.strip_prefix("FINAL ANSWER:") {
+        let content = response.content.trim();
+
+        // 2. XML-style tool call: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+        if let Some(action) = Self::parse_xml_tool_call(content) {
+            return Ok(action);
+        }
+
+        // 3. LangChain-style: Action: <name>\nAction Input: <json>
+        if let Some(action) = Self::parse_langchain_tool_call(content) {
+            return Ok(action);
+        }
+
+        // 4. Content-based "FINAL ANSWER:" marker
+        if let Some(after) = content.strip_prefix("FINAL ANSWER:") {
             return Ok(Action::FinalAnswer {
                 summary: after.trim().to_string(),
             });
         }
 
-        // 3. Default: treat content as final answer
+        // 5. Default: treat content as final answer
         Ok(Action::FinalAnswer {
-            summary: trimmed.to_string(),
+            summary: content.to_string(),
+        })
+    }
+
+    /// Try to parse an XML-style tool call like:
+    /// `<tool_call>{"name": "read_file", "arguments": {"path": "src/main.rs"}}</tool_call>`
+    fn parse_xml_tool_call(content: &str) -> Option<Action> {
+        let inner = content
+            .strip_prefix("<tool_call>")
+            .and_then(|s| s.strip_suffix("</tool_call>"))?;
+        let v: serde_json::Value = serde_json::from_str(inner).ok()?;
+        let name = v.get("name")?.as_str()?.to_string();
+        let params = v.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
+        Some(Action::ToolCall {
+            id: format!("text-{}", uuid::Uuid::new_v4()),
+            name,
+            params,
+        })
+    }
+
+    /// Try to parse LangChain-style:
+    /// ```text
+    /// Action: read_file
+    /// Action Input: {"path": "src/main.rs"}
+    /// ```
+    fn parse_langchain_tool_call(content: &str) -> Option<Action> {
+        let lines: Vec<&str> = content.lines().collect();
+        let action_line = lines.iter().find(|l| l.trim().starts_with("Action:"))?;
+        let tool_name = action_line
+            .trim()
+            .strip_prefix("Action:")?
+            .trim()
+            .to_string();
+
+        if tool_name.is_empty() {
+            return None;
+        }
+
+        let params = lines
+            .iter()
+            .find(|l| l.trim().starts_with("Action Input:"))
+            .and_then(|l| {
+                let json_str = l.trim().strip_prefix("Action Input:")?.trim();
+                serde_json::from_str(json_str).ok()
+            })
+            .unwrap_or(serde_json::Value::Null);
+
+        Some(Action::ToolCall {
+            id: format!("text-{}", uuid::Uuid::new_v4()),
+            name: tool_name,
+            params,
         })
     }
 }

@@ -292,16 +292,11 @@ fn apply_agent_event(event: AgentEvent, state: &mut AppState) {
 ///
 /// This is a fallback for non-TTY environments (e.g., CI, redirected output).
 /// It runs the agent loop directly and prints the result to stdout.
-pub fn run_cli(mut agent: AgentLoop, task: String) -> Result<()> {
+pub async fn run_cli(mut agent: AgentLoop, task: String) -> Result<()> {
     println!("Starting agent loop for task: {}", task);
     println!("---");
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| HarnessError::Config(format!("Failed to create tokio runtime: {}", e)))?;
-
-    let result = rt.block_on(agent.run(&task));
+    let result = agent.run(&task).await;
 
     match result {
         Ok(summary) => {

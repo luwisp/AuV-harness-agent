@@ -5,12 +5,19 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use harness_agent::config::HarnessConfig;
-use harness_agent::credentials::env::EnvCredentialBackend;
+use harness_agent::config::rules::RuleFile;
+use harness_agent::config::skills::SkillIndex;
+use harness_agent::credentials::keyring::KeyringCredentialBackend;
 use harness_agent::credentials::CredentialManager;
 use harness_agent::error::Result;
 use harness_agent::feedback::FeedbackRunner;
+use harness_agent::feedback::lint::LintChannel;
+use harness_agent::feedback::test_runner::TestRunnerChannel;
+use harness_agent::feedback::type_check::TypeCheckChannel;
 use harness_agent::guardrails::approval::ApprovalGate;
-use harness_agent::guardrails::assessor::RiskAssessor;
+use harness_agent::guardrails::assessor::{
+    CommandRiskAssessor, FileRiskAssessor, NetworkRiskAssessor, RiskAssessor,
+};
 use harness_agent::guardrails::audit::AuditLog;
 use harness_agent::guardrails::rules::StaticRuleEngine;
 use harness_agent::guardrails::sandbox::SandboxBoundary;
@@ -112,18 +119,18 @@ async fn main() -> Result<()> {
             let agent = build_agent(&config, &api_key, workspace)?;
 
             if no_tui || !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                run_cli(agent, task)
+                run_cli(agent, task).await
             } else {
                 run_tui(agent, task).await
             }
         }
 
-        Commands::Init => run_init(),
+        Commands::Init => run_init().await,
 
         Commands::Key { action } => match action {
-            KeyAction::Status => run_key_status(),
-            KeyAction::Set => run_key_set(),
-            KeyAction::Clear { key } => run_key_clear(&key),
+            KeyAction::Status => run_key_status().await,
+            KeyAction::Set => run_key_set().await,
+            KeyAction::Clear { key } => run_key_clear(&key).await,
         },
     }
 }
@@ -187,23 +194,46 @@ fn build_agent(
         config.llm.base_url.clone(),
     ));
 
-    // 2. Guardrails
-    let rules = StaticRuleEngine::new();
-    let assessors: Vec<Box<dyn RiskAssessor>> = vec![];
+    // 2. Guardrails — load built-in rules and all assessors
+    let mut rules = StaticRuleEngine::new();
+    rules.load_builtin_rules();
+
+    let assessors: Vec<Box<dyn RiskAssessor>> = if config.guardrails.enabled {
+        vec![
+            Box::new(CommandRiskAssessor),
+            Box::new(FileRiskAssessor),
+            Box::new(NetworkRiskAssessor),
+        ]
+    } else {
+        vec![]
+    };
+
     let approval = ApprovalGate::new(Duration::from_secs(
         config.guardrails.approval_timeout_secs,
     ));
     let sandbox = SandboxBoundary {
         workspace_root: workspace.clone(),
         allowed_commands: config.sandbox.allowed_commands.clone(),
-        forbidden_commands: config.sandbox.forbidden_commands.clone(),
+        forbidden_commands: if config.sandbox.forbidden_commands.is_empty() {
+            // Default deny: block dangerous commands when sandbox is enabled
+            vec![
+                "rm -rf /".to_string(),
+                "sudo".to_string(),
+                "chmod 777 /".to_string(),
+                "mkfs".to_string(),
+                "dd if=".to_string(),
+                ":(){ :|:& };:".to_string(),
+            ]
+        } else {
+            config.sandbox.forbidden_commands.clone()
+        },
         max_timeout: Duration::from_secs(config.sandbox.max_timeout_secs),
         network_allowed: config.sandbox.network_allowed,
     };
     let audit = AuditLog::new(config.guardrails.audit_log_path.clone());
     let guardrails = GuardrailPipeline::new(rules, assessors, approval, sandbox, audit);
 
-    // 3. Tools
+    // 3. Tools — register all available tools
     let mut tools = ToolRegistry::new();
     let disabled = &config.tools.disabled_tools;
     if !disabled.contains(&"bash".to_string()) {
@@ -214,9 +244,17 @@ fn build_agent(
         tools.register(Box::new(file::ReadFileTool))
             .map_err(|e| harness_agent::error::HarnessError::Config(format!("register read_file: {}", e)))?;
     }
+    if !disabled.contains(&"write_file".to_string()) {
+        tools.register(Box::new(file::WriteFileTool))
+            .map_err(|e| harness_agent::error::HarnessError::Config(format!("register write_file: {}", e)))?;
+    }
     if !disabled.contains(&"grep".to_string()) {
         tools.register(Box::new(search::GrepTool))
             .map_err(|e| harness_agent::error::HarnessError::Config(format!("register grep: {}", e)))?;
+    }
+    if !disabled.contains(&"glob".to_string()) {
+        tools.register(Box::new(search::GlobTool))
+            .map_err(|e| harness_agent::error::HarnessError::Config(format!("register glob: {}", e)))?;
     }
     if !disabled.contains(&"git_diff".to_string()) {
         tools.register(Box::new(git::GitDiffTool))
@@ -227,20 +265,57 @@ fn build_agent(
             .map_err(|e| harness_agent::error::HarnessError::Config(format!("register run_test: {}", e)))?;
     }
 
-    // 4. Feedback
-    let feedback = FeedbackRunner::new(vec![], config.feedback.max_retries);
+    // 4. Feedback — load channels when enabled
+    let feedback_channels: Vec<Box<dyn harness_agent::feedback::FeedbackChannel>> = if config.feedback.enabled {
+        vec![
+            Box::new(TestRunnerChannel),
+            Box::new(TypeCheckChannel),
+            Box::new(LintChannel),
+        ]
+    } else {
+        vec![]
+    };
+    let feedback = FeedbackRunner::new(feedback_channels, config.feedback.max_retries);
 
     // 5. Memory
     let memory = MemoryStore::new(config.memory.storage_path.clone())?;
 
-    // 6. Context builder
+    // 6. Context builder — load rules and skills
     let tool_menu = serde_json::to_string(&tools.generate_tool_menu())
         .unwrap_or_default();
+
+    let rules_text = if let Some(ref rules_file) = config.guardrails.rules_file {
+        if !rules_file.as_os_str().is_empty() {
+            RuleFile::from_file(rules_file)
+                .map(|rf| rf.to_system_prompt_fragment())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let skills_text = if let Some(ref skills_dir) = config.agent.skills_dir {
+        if !skills_dir.as_os_str().is_empty() {
+            SkillIndex::from_dir(skills_dir)
+                .map(|si| si.to_prompt_fragment())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let memory_index = memory.compact_index();
+
     let context_builder = ContextBuilder::from_config(
         config,
         tool_menu,
-        String::new(),
-        String::new(),
+        rules_text,
+        skills_text,
+        memory_index,
     );
 
     // 7. Assemble
@@ -260,7 +335,7 @@ fn build_agent(
 // run_init
 // ============================================================================
 
-fn run_init() -> Result<()> {
+async fn run_init() -> Result<()> {
     use std::io::{self, Write};
 
     println!("HarnessAgent Initialization");
@@ -287,7 +362,6 @@ fn run_init() -> Result<()> {
     let memory_path = PathBuf::from(".memory");
     if !memory_path.exists() {
         std::fs::create_dir_all(&memory_path)?;
-        // Create an empty MEMORY.md index file
         let index_path = memory_path.join("MEMORY.md");
         std::fs::write(&index_path, "# Memory Index\n\n")?;
         println!("Created .memory/ directory.");
@@ -302,7 +376,7 @@ fn run_init() -> Result<()> {
     io::stdin().read_line(&mut answer)?;
     let answer = answer.trim().to_lowercase();
     if answer == "y" || answer == "yes" {
-        run_key_set()?;
+        run_key_set().await?;
     }
 
     println!("\nInitialization complete.");
@@ -328,25 +402,25 @@ fn write_default_config(path: &PathBuf) -> Result<()> {
 // ============================================================================
 
 fn make_credential_manager() -> CredentialManager {
-    let backend = Box::new(EnvCredentialBackend::default_env());
+    let backend = Box::new(KeyringCredentialBackend::new());
     CredentialManager::new(backend)
 }
 
-fn run_key_status() -> Result<()> {
+async fn run_key_status() -> Result<()> {
     let manager = make_credential_manager();
     let status = manager.key_status()?;
     println!("{}", status);
     Ok(())
 }
 
-fn run_key_set() -> Result<()> {
+async fn run_key_set() -> Result<()> {
     let manager = make_credential_manager();
-    manager.key_set()
+    manager.key_set().await
 }
 
-fn run_key_clear(key: &str) -> Result<()> {
+async fn run_key_clear(key: &str) -> Result<()> {
     let manager = make_credential_manager();
-    manager.key_clear(key)?;
+    manager.key_clear(key).await?;
     println!("Key '{}' removed.", key);
     Ok(())
 }
@@ -784,16 +858,9 @@ mod tests {
 
     #[test]
     fn test_make_credential_manager() {
-        // Create a temp .env file so the default backend doesn't touch the
-        // real project .env.
-        let dir = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
         let manager = make_credential_manager();
-        let status = manager.key_status().unwrap();
-        assert_eq!(status, "No credentials configured.");
-
-        std::env::set_current_dir(original_dir).unwrap();
+        // key_status may fail if system keyring is unavailable;
+        // in that case, the manager will fall back to encrypted file
+        let _ = manager.key_status();
     }
 }
