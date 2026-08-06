@@ -44,7 +44,7 @@ use harness_agent::tui::{run_cli, run_tui};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,11 +105,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run {
+        None => {
+            let config = load_config(None)?;
+            let workspace = std::env::current_dir()?;
+            run_repl(config, workspace).await
+        }
+
+        Some(Commands::Run {
             task,
             config,
             no_tui,
-        } => {
+        }) => {
             let config = load_config(config)?;
             let workspace = std::env::current_dir()?;
 
@@ -125,14 +131,73 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Init => run_init().await,
+        Some(Commands::Init) => run_init().await,
 
-        Commands::Key { action } => match action {
+        Some(Commands::Key { action }) => match action {
             KeyAction::Status => run_key_status().await,
             KeyAction::Set => run_key_set().await,
             KeyAction::Clear { key } => run_key_clear(&key).await,
         },
     }
+}
+
+// ============================================================================
+// run_repl
+// ============================================================================
+
+/// Interactive REPL mode: reads tasks from stdin and runs the agent in a loop.
+async fn run_repl(config: HarnessConfig, workspace: PathBuf) -> Result<()> {
+    let api_key = resolve_api_key(&config)?;
+    let mut agent = build_agent(&config, &api_key, workspace)?;
+
+    println!("HarnessAgent REPL v0.1.0");
+    println!("Type a task for the agent, or /exit to quit.");
+    println!("Type /help for available commands.\n");
+
+    loop {
+        // Print prompt
+        print!("> ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) => break, // EOF / Ctrl+D
+            Ok(_) => {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed == "/exit" || trimmed == "/quit" {
+                    break;
+                }
+                if trimmed == "/help" {
+                    println!("Commands:");
+                    println!("  /exit, /quit  Exit the REPL");
+                    println!("  /help         Show this help");
+                    println!("  <task>        Run the agent with the given task");
+                    println!("  Ctrl+D        Exit the REPL");
+                    continue;
+                }
+                // Run the agent with the task
+                println!("\nRunning agent for: \"{}\"\n", trimmed);
+                match agent.run(trimmed).await {
+                    Ok(summary) => {
+                        println!("\nResult: {}\n", summary);
+                    }
+                    Err(e) => {
+                        eprintln!("\nError: {}\n", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Read error: {}", e);
+                break;
+            }
+        }
+    }
+
+    println!("\nGoodbye.");
+    Ok(())
 }
 
 // ============================================================================
@@ -381,7 +446,7 @@ async fn run_init() -> Result<()> {
 
     println!("\nInitialization complete.");
     println!("Edit config.toml to customize settings.");
-    println!("Run `harness run \"your task\"` to start the agent.");
+    println!("Run `harness run \"your task\"` for a single task, or just `harness` for interactive REPL mode.");
 
     Ok(())
 }
@@ -484,11 +549,11 @@ mod tests {
     fn test_run_with_task() {
         let cli = parse("run \"fix the login bug\"");
         match cli.command {
-            Commands::Run {
+            Some(Commands::Run {
                 task,
                 config,
                 no_tui,
-            } => {
+            }) => {
                 assert_eq!(task, "fix the login bug");
                 assert!(config.is_none());
                 assert!(!no_tui);
@@ -501,11 +566,11 @@ mod tests {
     fn test_run_with_config_flag() {
         let cli = parse("run -c my-config.toml \"do stuff\"");
         match cli.command {
-            Commands::Run {
+            Some(Commands::Run {
                 task,
                 config,
                 no_tui,
-            } => {
+            }) => {
                 assert_eq!(task, "do stuff");
                 assert_eq!(config, Some(PathBuf::from("my-config.toml")));
                 assert!(!no_tui);
@@ -518,11 +583,11 @@ mod tests {
     fn test_run_with_long_config_flag() {
         let cli = parse("run --config prod.toml \"deploy\"");
         match cli.command {
-            Commands::Run {
+            Some(Commands::Run {
                 task,
                 config,
                 no_tui,
-            } => {
+            }) => {
                 assert_eq!(task, "deploy");
                 assert_eq!(config, Some(PathBuf::from("prod.toml")));
                 assert!(!no_tui);
@@ -535,11 +600,11 @@ mod tests {
     fn test_run_with_no_tui_flag() {
         let cli = parse("run --no-tui \"run tests\"");
         match cli.command {
-            Commands::Run {
+            Some(Commands::Run {
                 task,
                 config,
                 no_tui,
-            } => {
+            }) => {
                 assert_eq!(task, "run tests");
                 assert!(config.is_none());
                 assert!(no_tui);
@@ -552,11 +617,11 @@ mod tests {
     fn test_run_with_all_flags() {
         let cli = parse("run -c custom.toml --no-tui \"complex task\"");
         match cli.command {
-            Commands::Run {
+            Some(Commands::Run {
                 task,
                 config,
                 no_tui,
-            } => {
+            }) => {
                 assert_eq!(task, "complex task");
                 assert_eq!(config, Some(PathBuf::from("custom.toml")));
                 assert!(no_tui);
@@ -572,7 +637,7 @@ mod tests {
     #[test]
     fn test_init_command() {
         let cli = parse("init");
-        assert!(matches!(cli.command, Commands::Init));
+        assert!(matches!(cli.command, Some(Commands::Init)));
     }
 
     // -----------------------------------------------------------------------
@@ -583,7 +648,7 @@ mod tests {
     fn test_key_status() {
         let cli = parse("key status");
         match cli.command {
-            Commands::Key { action } => {
+            Some(Commands::Key { action }) => {
                 assert!(matches!(action, KeyAction::Status));
             }
             _ => panic!("Expected Commands::Key"),
@@ -594,7 +659,7 @@ mod tests {
     fn test_key_set() {
         let cli = parse("key set");
         match cli.command {
-            Commands::Key { action } => {
+            Some(Commands::Key { action }) => {
                 assert!(matches!(action, KeyAction::Set));
             }
             _ => panic!("Expected Commands::Key"),
@@ -605,7 +670,7 @@ mod tests {
     fn test_key_clear() {
         let cli = parse("key clear openai_api_key");
         match cli.command {
-            Commands::Key { action } => match action {
+            Some(Commands::Key { action }) => match action {
                 KeyAction::Clear { key } => {
                     assert_eq!(key, "openai_api_key");
                 }
@@ -619,7 +684,7 @@ mod tests {
     fn test_key_clear_with_quoted_key() {
         let cli = parse("key clear \"my secret key\"");
         match cli.command {
-            Commands::Key { action } => match action {
+            Some(Commands::Key { action }) => match action {
                 KeyAction::Clear { key } => {
                     assert_eq!(key, "my secret key");
                 }
@@ -668,7 +733,7 @@ mod tests {
     fn test_run_with_special_characters_in_task() {
         let cli = parse("run \"fix bug #123: login doesn't work (urgent!)\"");
         match cli.command {
-            Commands::Run { task, .. } => {
+            Some(Commands::Run { task, .. }) => {
                 assert_eq!(task, "fix bug #123: login doesn't work (urgent!)");
             }
             _ => panic!("Expected Commands::Run"),
@@ -676,17 +741,10 @@ mod tests {
     }
 
     #[test]
-    fn test_no_subcommand_shows_error() {
+    fn test_no_subcommand_enters_repl() {
         let args: Vec<&str> = vec!["harness"];
-        let result = Cli::try_parse_from(args);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("requires a subcommand") || msg.contains("subcommand"),
-            "Expected error about missing subcommand, got: {}",
-            msg
-        );
+        let cli = Cli::parse_from(args);
+        assert!(cli.command.is_none(), "No subcommand should enter REPL mode");
     }
 
     #[test]
