@@ -284,15 +284,13 @@ impl CredentialBackend for KeyringCredentialBackend {
 
     fn list_keys(&self) -> Result<Vec<String>> {
         if self.keyring_available {
-            // The keyring crate doesn't support listing keys, so we return
-            // a note and rely on the fallback for listing if needed.
-            // For now, return an empty list with a note.
-            Err(HarnessError::Credential(
-                "Listing keys is not supported by the system keyring. \
-                 Use key_status() to see configured keys from encrypted fallback, \
-                 or clear and re-add keys using the encrypted file backend."
-                    .to_string(),
-            ))
+            // The keyring crate doesn't support listing keys. Fall back to
+            // the encrypted file for listing, which serves as a secondary
+            // index of known keys.
+            let map = read_encrypted_file().unwrap_or_default();
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            Ok(keys)
         } else {
             let map = read_encrypted_file()?;
             let mut keys: Vec<String> = map.keys().cloned().collect();

@@ -29,6 +29,7 @@ use harness_agent::r#loop::AgentLoop;
 use harness_agent::memory::MemoryStore;
 use harness_agent::tools::{bash, file, git, search, test_runner, ToolRegistry};
 use harness_agent::tui::{run_cli, run_tui};
+use harness_agent::types::{Message, Role};
 
 // ============================================================================
 // CLI definition
@@ -146,9 +147,16 @@ async fn main() -> Result<()> {
 // ============================================================================
 
 /// Interactive REPL mode: reads tasks from stdin and runs the agent in a loop.
+///
+/// Conversation history is accumulated across turns so the agent remembers
+/// previous interactions. Tool calls and their results are preserved in the
+/// message history between turns.
 async fn run_repl(config: HarnessConfig, workspace: PathBuf) -> Result<()> {
     let api_key = resolve_api_key(&config)?;
     let mut agent = build_agent(&config, &api_key, workspace)?;
+
+    // Accumulated conversation history across all REPL turns
+    let mut conversation: Vec<Message> = Vec::new();
 
     println!("HarnessAgent REPL v0.1.0");
     println!("Type a task for the agent, or /exit to quit.");
@@ -176,16 +184,35 @@ async fn run_repl(config: HarnessConfig, workspace: PathBuf) -> Result<()> {
                     println!("  /help         Show this help");
                     println!("  <task>        Run the agent with the given task");
                     println!("  Ctrl+D        Exit the REPL");
+                    println!("\nConversation history: {} messages across previous turns",
+                             conversation.len());
                     continue;
                 }
-                // Run the agent with the task
-                println!("\nRunning agent for: \"{}\"\n", trimmed);
-                match agent.run(trimmed).await {
-                    Ok(summary) => {
-                        println!("\nResult: {}\n", summary);
+                // Run the agent with accumulated conversation history
+                println!("\n⏳ Running agent for: \"{}\"\n", trimmed);
+                match agent.run_with_history(trimmed, &conversation).await {
+                    Ok((summary, messages)) => {
+                        // Extract conversation messages (skip system prompt
+                        // and initial user task — those are rebuilt fresh
+                        // each turn by context_builder.build()).
+                        // Keep only assistant/tool messages for history.
+                        conversation = messages
+                            .into_iter()
+                            .filter(|m| matches!(m.role, Role::Assistant | Role::Tool))
+                            .collect();
+
+                        // Append the final answer so the LLM sees its own
+                        // previous responses in subsequent turns.
+                        conversation.push(Message {
+                            role: Role::Assistant,
+                            content: summary.clone(),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                        println!("\n✅ Result: {}\n", summary);
                     }
                     Err(e) => {
-                        eprintln!("\nError: {}\n", e);
+                        eprintln!("\n❌ Error: {}\n", e);
                     }
                 }
             }

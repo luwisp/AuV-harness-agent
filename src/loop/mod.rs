@@ -106,11 +106,30 @@ impl AgentLoop {
     /// Returns the final answer string on success, or an error if the loop
     /// is interrupted by guardrails, max turns, or token budget.
     pub async fn run(&mut self, task: &str) -> Result<String> {
-        // 1. Load memory
+        let (result, _messages) = self.run_with_history(task, &[]).await?;
+        Ok(result)
+    }
+
+    /// Run the agent loop with existing conversation history.
+    ///
+    /// Unlike [`run`], this method prepends the given message history so the
+    /// LLM sees all previous turns. This is used by the interactive REPL to
+    /// maintain continuity across multiple user inputs.
+    ///
+    /// Returns a tuple of the final answer string and all messages generated
+    /// during this run (including the initial context and any tool
+    /// interactions). The returned messages can be passed as `history` to a
+    /// subsequent call to continue the conversation.
+    pub async fn run_with_history(
+        &mut self,
+        task: &str,
+        history: &[Message],
+    ) -> Result<(String, Vec<Message>)> {
+        // 1. Load memory (only on first run — cheap no-op for subsequent calls)
         self.memory.load_all()?;
 
-        // 2. Build initial context
-        let mut messages = self.context_builder.build(&[], task);
+        // 2. Build initial context with existing conversation history
+        let mut messages = self.context_builder.build(history, task);
 
         let mut tokens_used: u32 = 0;
         let max_turns = self.config.agent.max_turns;
@@ -125,6 +144,16 @@ impl AgentLoop {
 
             // b. Parse response into action
             let action = ActionParser::parse(&response)?;
+
+            // b2. Add assistant message to conversation history.
+            // Preserve native tool_calls so APIs that require
+            // proper tool_call_id tracking (DeepSeek, etc.) work.
+            messages.push(Message {
+                role: Role::Assistant,
+                content: response.content.clone(),
+                tool_calls: response.tool_calls.clone(),
+                tool_call_id: None,
+            });
 
             // Record trace
             self.trace.push(TraceEntry {
@@ -161,11 +190,11 @@ impl AgentLoop {
 
             // d. Check for final answer
             if let Action::FinalAnswer { ref summary } = action {
-                return Ok(summary.clone());
+                return Ok((summary.clone(), messages));
             }
 
             // e. Execute tool call
-            if let Action::ToolCall { ref name, ref params, .. } = action {
+            if let Action::ToolCall { ref id, ref name, ref params } = action {
                 let tool_ctx = ToolContext {
                     workspace_root: self.workspace_root.clone(),
                     command_timeout: std::time::Duration::from_secs(
@@ -179,18 +208,11 @@ impl AgentLoop {
                     Err(e) => {
                         // Inject the error as a tool result so the LLM can
                         // see it and potentially correct itself.
-                        let error_content = format!("Error: {}", e);
-                        messages.push(Message {
-                            role: Role::Assistant,
-                            content: format!("Tool call: {} with params: {}", name, params),
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
                         messages.push(Message {
                             role: Role::Tool,
-                            content: error_content,
+                            content: format!("Error: {}", e),
                             tool_calls: None,
-                            tool_call_id: None,
+                            tool_call_id: Some(id.clone()),
                         });
                         continue;
                     }
@@ -208,14 +230,7 @@ impl AgentLoop {
 
                 let feedback_results = self.feedback.run_all(&action, &feedback_ctx).await;
 
-                // g. Inject tool result and feedback into messages
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: format!("Tool call: {} with params: {}", name, params),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-
+                // g. Inject tool result (with proper tool_call_id)
                 let mut tool_content = format!(
                     "Success: {}\nResult: {}",
                     tool_result.success, tool_result.content
@@ -230,14 +245,14 @@ impl AgentLoop {
                     role: Role::Tool,
                     content: tool_content,
                     tool_calls: None,
-                    tool_call_id: None,
+                    tool_call_id: Some(id.clone()),
                 });
             }
 
             // h. Stop judgment (after the turn is processed)
             if self.stop_judgment(&action, turn, tokens_used) {
                 if let Action::FinalAnswer { summary } = action {
-                    return Ok(summary);
+                    return Ok((summary, messages));
                 }
                 // If we hit max_turns or token budget without a final answer,
                 // return the last content as the answer
