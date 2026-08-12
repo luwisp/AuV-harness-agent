@@ -192,23 +192,16 @@ async fn run_repl(config: HarnessConfig, workspace: PathBuf) -> Result<()> {
                 println!("\n⏳ Running agent for: \"{}\"\n", trimmed);
                 match agent.run_with_history(trimmed, &conversation).await {
                     Ok((summary, messages)) => {
-                        // Extract conversation messages (skip system prompt
-                        // and initial user task — those are rebuilt fresh
-                        // each turn by context_builder.build()).
-                        // Keep only assistant/tool messages for history.
+                        // The returned messages already include the
+                        // assistant response (added in the agent loop
+                        // before the FinalAnswer check). Keep only
+                        // assistant/tool messages for history — system
+                        // prompt and user task are rebuilt fresh each turn.
                         conversation = messages
                             .into_iter()
                             .filter(|m| matches!(m.role, Role::Assistant | Role::Tool))
                             .collect();
 
-                        // Append the final answer so the LLM sees its own
-                        // previous responses in subsequent turns.
-                        conversation.push(Message {
-                            role: Role::Assistant,
-                            content: summary.clone(),
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
                         println!("\n✅ Result: {}\n", summary);
                     }
                     Err(e) => {
