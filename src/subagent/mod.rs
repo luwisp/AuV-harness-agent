@@ -29,7 +29,25 @@ pub trait AgentRunner: Send + Sync {
     ///
     /// `spawner` 是**子层** spawner（深度 +1），生产 Runner 用它注册
     /// 递归 subagent 工具，实现嵌套委派。
-    async fn run(&self, task: &str, spawner: &SubagentSpawner) -> Result<String>;
+    async fn run(&self, task: &str, spawner: Arc<SubagentSpawner>) -> Result<String>;
+}
+
+/// 子 agent 审批的路由方式。
+///
+/// 父 agent 在工具执行期间同步阻塞，无法处理子审批事件，因此子审批
+/// 不经过父 loop 的事件通道，而是按界面形态路由：
+///
+/// - [`SubagentApproval::InBandStdin`]（REPL / CLI）：子 loop 的审批门
+///   在子线程内走 stdin 交互（打印审批块 + 读取 y/n）；
+/// - [`SubagentApproval::UiEvents`]（TUI）：stdin 被 crossterm raw mode
+///   接管，子审批请求以事件发给 UI 面板，决定经事件自带的通道回发。
+#[derive(Debug, Clone)]
+pub enum SubagentApproval {
+    InBandStdin,
+    UiEvents {
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AgentEvent>,
+        label: String,
+    },
 }
 
 /// Manages spawning of subagents with depth and concurrency limits.
@@ -118,7 +136,7 @@ impl SubagentSpawner {
 
         // Run the agent；子层 spawner 用于递归委派
         let child = self.for_child();
-        let result = self.runner.run(task, &child).await;
+        let result = self.runner.run(task, child).await;
 
         // Decrement active count after the agent completes
         self.active_count.fetch_sub(1, Ordering::SeqCst);
@@ -159,12 +177,12 @@ impl SubagentSpawner {
 /// 工厂在 main.rs 装配（捕获配置、API key、审批模式等），子 loop 通过
 /// 传入的**子层** spawner 注册递归 subagent 工具，实现嵌套委派。
 pub struct AgentLoopRunner {
-    factory: Arc<dyn Fn(&SubagentSpawner) -> Result<crate::r#loop::AgentLoop> + Send + Sync>,
+    factory: Arc<dyn Fn(Arc<SubagentSpawner>) -> Result<crate::r#loop::AgentLoop> + Send + Sync>,
 }
 
 impl AgentLoopRunner {
     pub fn new(
-        factory: Arc<dyn Fn(&SubagentSpawner) -> Result<crate::r#loop::AgentLoop> + Send + Sync>,
+        factory: Arc<dyn Fn(Arc<SubagentSpawner>) -> Result<crate::r#loop::AgentLoop> + Send + Sync>,
     ) -> Self {
         Self { factory }
     }
@@ -172,7 +190,7 @@ impl AgentLoopRunner {
 
 #[async_trait]
 impl AgentRunner for AgentLoopRunner {
-    async fn run(&self, task: &str, spawner: &SubagentSpawner) -> Result<String> {
+    async fn run(&self, task: &str, spawner: Arc<SubagentSpawner>) -> Result<String> {
         let mut child_loop = (self.factory)(spawner)?;
         let (result, _messages) = child_loop.run_with_history(task, &[]).await?;
         Ok(result)
@@ -195,7 +213,7 @@ mod tests {
 
     #[async_trait]
     impl AgentRunner for MockRunner {
-        async fn run(&self, _task: &str, _spawner: &SubagentSpawner) -> Result<String> {
+        async fn run(&self, _task: &str, _spawner: Arc<SubagentSpawner>) -> Result<String> {
             Ok(self.result.clone())
         }
     }
@@ -205,7 +223,7 @@ mod tests {
 
     #[async_trait]
     impl AgentRunner for SlowRunner {
-        async fn run(&self, _task: &str, _spawner: &SubagentSpawner) -> Result<String> {
+        async fn run(&self, _task: &str, _spawner: Arc<SubagentSpawner>) -> Result<String> {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             Ok("slow done".to_string())
         }
@@ -377,7 +395,7 @@ mod tests {
 
         #[async_trait]
         impl AgentRunner for BarrierRunner {
-            async fn run(&self, _task: &str, _spawner: &SubagentSpawner) -> Result<String> {
+            async fn run(&self, _task: &str, _spawner: Arc<SubagentSpawner>) -> Result<String> {
                 // Block at the barrier, keeping the agent "active"
                 self.barrier.wait().await;
                 Ok("done".to_string())

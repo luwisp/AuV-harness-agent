@@ -49,6 +49,11 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
+    /// 已注册工具名列表（测试/诊断用）。
+    pub fn names(&self) -> Vec<String> {
+        self.tools.iter().map(|t| t.name().to_string()).collect()
+    }
+
     /// Register a tool. Returns `Ok(())` on success, or an error if a tool
     /// with the same name is already registered.
     pub fn register(&mut self, tool: Box<dyn Tool>) -> Result<()> {

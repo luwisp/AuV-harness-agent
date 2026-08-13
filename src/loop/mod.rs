@@ -126,6 +126,11 @@ impl AgentLoop {
         self.guardrails.set_approval_level(level);
     }
 
+    /// 已注册的工具注册表（测试/诊断用）。
+    pub fn tools(&self) -> &crate::tools::ToolRegistry {
+        &self.tools
+    }
+
     /// Run the agent loop to completion for the given task.
     ///
     /// Returns the final answer string on success, or an error if the loop

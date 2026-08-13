@@ -59,6 +59,9 @@ pub struct ApprovalGate {
     /// UI 事件模式（TUI）：向 UI 发送审批请求并等待决定。
     /// None 表示 stdin 交互模式（REPL / 纯文本模式）。
     ui: Option<ApprovalUi>,
+    /// 审批来源标签（如「子 agent」）：stdin 打印路径在标题与提示中
+    /// 标注，用于区分父子审批块。
+    context_label: Option<String>,
 }
 
 /// UI 事件模式的审批通道：审批请求以事件发给 UI 面板渲染，
@@ -76,6 +79,20 @@ impl ApprovalGate {
             timeout,
             session_whitelist: HashSet::new(),
             ui: None,
+            context_label: None,
+        }
+    }
+
+    /// Create a new approval gate with a context label (stdin 交互模式).
+    ///
+    /// 用于子 agent 的审批门：审批块标题与提示标注来源标签
+    /// （如「子 agent」），与父审批块区分。
+    pub fn new_with_context(timeout: Duration, label: Option<&str>) -> Self {
+        Self {
+            timeout,
+            session_whitelist: HashSet::new(),
+            ui: None,
+            context_label: label.map(|s| s.to_string()),
         }
     }
 
@@ -97,6 +114,7 @@ impl ApprovalGate {
                 event_tx,
                 decision_rx,
             }),
+            context_label: None,
         }
     }
 
@@ -174,7 +192,7 @@ impl ApprovalGate {
         }
 
         // Step 3: print risk info to stderr
-        print_risk_info(action, assessment);
+        print_risk_info(action, assessment, self.context_label.as_deref());
 
         // Step 4: wait for user input with timeout
         let decision = match input.await {
@@ -301,7 +319,9 @@ pub enum UserResponse {
 }
 
 /// Print risk information about the action to stderr.
-fn print_risk_info(action: &Action, assessment: &RiskAssessment) {
+///
+/// `label` 标注审批来源（如「子 agent」），在标题与提示中展示。
+fn print_risk_info(action: &Action, assessment: &RiskAssessment, label: Option<&str>) {
     let mut stderr = io::stderr().lock();
 
     // 保存光标位置（DECSC）：审批结束后整块清除，不留在对话流里
@@ -310,7 +330,14 @@ fn print_risk_info(action: &Action, assessment: &RiskAssessment) {
     }
 
     let _ = writeln!(stderr);
-    let _ = writeln!(stderr, "=== 需要护栏审批 ===");
+    match label {
+        Some(label) => {
+            let _ = writeln!(stderr, "=== 需要护栏审批（{label}） ===");
+        }
+        None => {
+            let _ = writeln!(stderr, "=== 需要护栏审批 ===");
+        }
+    }
     let _ = writeln!(stderr, "操作: {}", action_display(action));
     let _ = writeln!(stderr, "风险等级: {}", risk_level_cn(&assessment.level));
 
