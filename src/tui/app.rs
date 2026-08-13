@@ -1,3 +1,4 @@
+pub use crate::events::ApprovalRequest;
 use crate::types::{Message, ToolResult};
 
 /// Which panel in the TUI has keyboard focus.
@@ -22,36 +23,6 @@ impl Focus {
             Focus::Tools => Focus::Guardrails,
             Focus::Guardrails => Focus::Status,
             Focus::Status => Focus::Conversation,
-        }
-    }
-}
-
-/// Represents a guardrail approval request displayed to the user in the TUI.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ApprovalRequest {
-    /// Unique identifier for this approval request.
-    pub id: String,
-    /// Human-readable summary of the action requiring approval.
-    pub action_summary: String,
-    /// The risk level associated with the action (e.g., "High", "Critical").
-    pub risk_level: String,
-    /// Reasons explaining why the action requires approval.
-    pub reasons: Vec<String>,
-}
-
-impl ApprovalRequest {
-    /// Create a new approval request.
-    pub fn new(
-        id: String,
-        action_summary: String,
-        risk_level: String,
-        reasons: Vec<String>,
-    ) -> Self {
-        Self {
-            id,
-            action_summary,
-            risk_level,
-            reasons,
         }
     }
 }
@@ -172,6 +143,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: content.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -243,7 +215,7 @@ mod tests {
             "bash: rm -rf /tmp/test".to_string(),
             "High".to_string(),
             vec!["Destructive command".to_string()],
-        );
+            None);
         state.add_guard_request(req.clone());
         assert_eq!(state.guard_requests.len(), 1);
         assert_eq!(state.guard_requests[0], req);
@@ -257,13 +229,13 @@ mod tests {
             "action 1".to_string(),
             "High".to_string(),
             vec!["reason".to_string()],
-        ));
+            None));
         state.add_guard_request(ApprovalRequest::new(
             "req-2".to_string(),
             "action 2".to_string(),
             "Medium".to_string(),
             vec!["reason 2".to_string()],
-        ));
+            None));
 
         assert!(state.remove_guard_request("req-1"));
         assert_eq!(state.guard_requests.len(), 1);
@@ -323,7 +295,7 @@ mod tests {
             "bash: rm -rf /tmp".to_string(),
             "Critical".to_string(),
             vec!["Destructive command".to_string(), "Outside workspace".to_string()],
-        );
+            None);
         assert_eq!(req.id, "req-1");
         assert_eq!(req.action_summary, "bash: rm -rf /tmp");
         assert_eq!(req.risk_level, "Critical");
@@ -337,7 +309,7 @@ mod tests {
             "action".to_string(),
             "High".to_string(),
             vec!["reason".to_string()],
-        );
+            None);
         let cloned = req.clone();
         assert_eq!(req, cloned);
     }

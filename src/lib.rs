@@ -3,6 +3,7 @@
 pub mod config;
 pub mod credentials;
 pub mod error;
+pub mod events;
 pub mod feedback;
 pub mod guardrails;
 pub mod llm;

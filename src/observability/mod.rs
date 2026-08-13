@@ -62,6 +62,7 @@ mod tests {
             messages_snapshot: vec![Message {
                 role: Role::User,
                 content: format!("test message {turn}"),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             }],

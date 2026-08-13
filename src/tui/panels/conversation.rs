@@ -135,12 +135,14 @@ mod tests {
         state.messages.push(Message {
             role: Role::User,
             content: "Hello, agent!".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
         state.messages.push(Message {
             role: Role::Assistant,
             content: "Hello! How can I help?".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
@@ -166,24 +168,28 @@ mod tests {
         state.messages.push(Message {
             role: Role::User,
             content: "user msg".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
         state.messages.push(Message {
             role: Role::Assistant,
             content: "assistant msg".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
         state.messages.push(Message {
             role: Role::System,
             content: "system msg".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
         state.messages.push(Message {
             role: Role::Tool,
             content: "tool msg".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
@@ -211,6 +217,7 @@ mod tests {
             state.messages.push(Message {
                 role: Role::User,
                 content: format!("Message number {}", i),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             });

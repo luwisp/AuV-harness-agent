@@ -41,6 +41,10 @@ struct ChatRequest {
 struct ChatMessage {
     role: String,
     content: String,
+    /// DeepSeek 思考模式：assistant 消息必须把上轮返回的
+    /// reasoning_content 原样传回，否则 API 返回 400。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +84,8 @@ struct Choice {
 struct ResponseMessage {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ResponseToolCall>>,
 }
@@ -131,6 +137,7 @@ fn messages_to_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
     messages.iter().map(|m| ChatMessage {
         role: role_to_string(&m.role),
         content: m.content.clone(),
+        reasoning_content: m.reasoning_content.clone(),
         tool_calls: m.tool_calls.as_ref().map(|tcs| {
             tcs.iter().map(|tc| ChatToolCall {
                 id: tc.id.clone(),
@@ -202,6 +209,14 @@ impl LlmProvider for OpenAiProvider {
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            // Log the failing request for debugging
+            let req_json = serde_json::to_string_pretty(&request).unwrap_or_default();
+            tracing::debug!(
+                status = status.as_u16(),
+                body = %body,
+                request = %req_json,
+                "LLM API error"
+            );
             return Err(HarnessError::Llm(format!("HTTP {}: {}", status.as_u16(), body)));
         }
 
@@ -212,6 +227,7 @@ impl LlmProvider for OpenAiProvider {
 
         let finish_reason = map_finish_reason(&choice.finish_reason.unwrap_or_default());
         let content = choice.message.content.unwrap_or_default();
+        let reasoning_content = choice.message.reasoning_content;
         let tool_calls = parse_tool_calls(choice.message.tool_calls);
 
         let usage = chat_response.usage.map(|u| TokenUsage {
@@ -222,6 +238,7 @@ impl LlmProvider for OpenAiProvider {
 
         Ok(LlmResponse {
             content,
+            reasoning_content,
             finish_reason,
             usage,
             tool_calls,
@@ -266,6 +283,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: "hi".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }];
@@ -312,6 +330,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: "read main.rs".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }];
@@ -346,6 +365,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: "hi".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }];
@@ -356,5 +376,77 @@ mod tests {
             HarnessError::Auth(_) => {} // expected
             other => panic!("Expected Auth error, got: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_openai_passes_reasoning_content_through() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "message": {
+                        "content": "Let me think...",
+                        "reasoning_content": "思考过程：先读取文件，再决定下一步"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let provider = OpenAiProvider::new(
+            "test-key".to_string(),
+            "deepseek-reasoner".to_string(),
+            Some(mock_server.uri()),
+        );
+
+        // 第一次调用：解析响应中的 reasoning_content
+        let messages = vec![Message {
+            role: Role::User,
+            content: "hi".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let response = provider.complete(&messages, &[]).await.unwrap();
+        assert_eq!(
+            response.reasoning_content.as_deref(),
+            Some("思考过程：先读取文件，再决定下一步")
+        );
+
+        // 第二次调用：assistant 消息携带 reasoning_content，必须原样回传
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: "hi".to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "Let me think...".to_string(),
+                reasoning_content: response.reasoning_content,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        provider.complete(&messages, &[]).await.unwrap();
+
+        // 校验收到的请求体：assistant 消息包含原样的 reasoning_content，
+        // 而 user 消息不带该字段
+        let received = mock_server.received_requests().await.unwrap().pop().unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+        let user_msg = &body["messages"][0];
+        let assistant_msg = &body["messages"][1];
+        assert!(user_msg.get("reasoning_content").is_none());
+        assert_eq!(assistant_msg["role"], "assistant");
+        assert_eq!(
+            assistant_msg["reasoning_content"],
+            "思考过程：先读取文件，再决定下一步"
+        );
     }
 }

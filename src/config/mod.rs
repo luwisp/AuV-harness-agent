@@ -47,6 +47,10 @@ pub struct GuardConfig {
     pub approval_timeout_secs: u64,
     #[serde(default = "default_audit_log")]
     pub audit_log_path: PathBuf,
+    /// 审批力度：无/低/中/高（默认「低」）。
+    /// 支持中文档位名或英文别名（none/low/medium/high）。
+    #[serde(default)]
+    pub approval_level: crate::guardrails::ApprovalLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +159,7 @@ impl Default for GuardConfig {
             rules_file: None,
             approval_timeout_secs: default_approval_timeout(),
             audit_log_path: default_audit_log(),
+            approval_level: crate::guardrails::ApprovalLevel::default(),
         }
     }
 }
@@ -276,5 +281,56 @@ max_turns = 10
         // Defaults should fill in
         assert_eq!(config.llm.provider, "openai");
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_approval_level_defaults_to_low() {
+        let toml_content = r#"
+[llm]
+model = "gpt-4o-mini"
+
+[guardrails]
+approval_timeout_secs = 5
+"#;
+        let config: HarnessConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.guardrails.approval_level,
+            crate::guardrails::ApprovalLevel::Low,
+            "未配置 approval_level 时应默认「低」"
+        );
+    }
+
+    #[test]
+    fn test_approval_level_parses_english_primary_and_chinese_alias() {
+        // 英文主值
+        let config: HarnessConfig = toml::from_str(
+            "[llm]\nmodel = \"m\"\n[guardrails]\napproval_level = \"high\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.guardrails.approval_level,
+            crate::guardrails::ApprovalLevel::High
+        );
+
+        // 中文别名（兼容旧配置）
+        let config: HarnessConfig = toml::from_str(
+            "[llm]\nmodel = \"m\"\n[guardrails]\napproval_level = \"无\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.guardrails.approval_level,
+            crate::guardrails::ApprovalLevel::None
+        );
+    }
+
+    #[test]
+    fn test_approval_level_serializes_as_english() {
+        let config = HarnessConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(
+            toml_str.contains("approval_level = \"low\""),
+            "序列化应输出英文主值 low，实际：{}",
+            toml_str
+        );
     }
 }

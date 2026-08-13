@@ -31,6 +31,7 @@ impl LlmProvider for MockLlmProvider {
         } else {
             Ok(LlmResponse {
                 content: "Done".to_string(),
+                reasoning_content: None,
                 finish_reason: FinishReason::Stop,
                 usage: TokenUsage::default(),
                 tool_calls: None,
@@ -47,6 +48,7 @@ mod tests {
     fn make_response(content: &str, finish_reason: FinishReason) -> LlmResponse {
         LlmResponse {
             content: content.to_string(),
+            reasoning_content: None,
             finish_reason,
             usage: TokenUsage::default(),
             tool_calls: None,
@@ -95,6 +97,7 @@ mod tests {
         };
         let response = LlmResponse {
             content: String::new(),
+            reasoning_content: None,
             finish_reason: FinishReason::ToolCalls,
             usage: TokenUsage::default(),
             tool_calls: Some(vec![tool_call.clone()]),

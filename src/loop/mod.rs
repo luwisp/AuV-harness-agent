@@ -3,16 +3,18 @@ pub mod parser;
 
 use chrono::Utc;
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 
 use crate::config::HarnessConfig;
 use crate::error::{HarnessError, Result};
+use crate::events::AgentEvent;
 use crate::feedback::{FeedbackContext, FeedbackRunner, format_feedback_for_llm};
 use crate::guardrails::{GuardContext, GuardrailPipeline};
 use crate::llm::LlmProvider;
 use crate::memory::MemoryStore;
 use crate::tools::context::ToolContext;
 use crate::tools::ToolRegistry;
-use crate::types::{Action, GuardResult, Message, Role};
+use crate::types::{Action, GuardResult, Message, Role, ToolCall};
 
 use context::ContextBuilder;
 use parser::ActionParser;
@@ -69,6 +71,8 @@ pub struct AgentLoop {
     context_builder: ContextBuilder,
     session_id: String,
     workspace_root: PathBuf,
+    /// Optional event sender for streaming progress to the UI (TUI, REPL).
+    event_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl AgentLoop {
@@ -76,6 +80,10 @@ impl AgentLoop {
     ///
     /// A random session ID is generated for audit logging and guardrail
     /// context.
+    ///
+    /// `event_tx` is an optional channel sender: when provided, the loop
+    /// emits [`AgentEvent`] messages so the UI (TUI or REPL) can show
+    /// live progress. Pass `None` for headless / test usage.
     pub fn new(
         llm: Box<dyn LlmProvider>,
         guardrails: GuardrailPipeline,
@@ -85,6 +93,7 @@ impl AgentLoop {
         config: HarnessConfig,
         context_builder: ContextBuilder,
         workspace_root: PathBuf,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Self {
         let session_id = uuid::Uuid::new_v4().to_string();
         Self {
@@ -98,7 +107,23 @@ impl AgentLoop {
             context_builder,
             session_id,
             workspace_root,
+            event_tx,
         }
+    }
+
+    /// Send an event to the UI if a sender is configured.
+    ///
+    /// Non-blocking: if the channel is full the event is dropped.
+    /// The UI is best-effort — never block the agent on a slow consumer.
+    fn emit(&self, event: AgentEvent) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.try_send(event);
+        }
+    }
+
+    /// 运行时调整审批力度（REPL `/approval` 指令），无需重建 agent。
+    pub fn set_approval_level(&mut self, level: crate::guardrails::ApprovalLevel) {
+        self.guardrails.set_approval_level(level);
     }
 
     /// Run the agent loop to completion for the given task.
@@ -142,18 +167,49 @@ impl AgentLoop {
             let response = self.llm.complete(&messages, &tool_list).await?;
             tokens_used += response.usage.total_tokens;
 
+            // Emit progress update for the UI
+            self.emit(AgentEvent::ProgressUpdate {
+                turn,
+                tokens_used,
+                risk_level: "Low".to_string(), // TODO: derive from guardrails
+            });
+
             // b. Parse response into action
             let action = ActionParser::parse(&response)?;
 
             // b2. Add assistant message to conversation history.
-            // Preserve native tool_calls so APIs that require
-            // proper tool_call_id tracking (DeepSeek, etc.) work.
-            messages.push(Message {
+            // CRITICAL: only store the tool call that actually executes
+            // below. APIs like DeepSeek strictly require every
+            // tool_call_id in an assistant message to be answered by a
+            // following tool message — storing tool calls that never get
+            // executed (e.g. extra calls in a multi-call response) breaks
+            // that pairing and makes the next LLM request fail with
+            // HTTP 400 "insufficient tool messages following tool_calls".
+            let assistant_tool_calls = response.tool_calls.as_ref().and_then(|tcs| {
+                let matching: Vec<ToolCall> = tcs
+                    .iter()
+                    .filter(|tc| matches!(&action, Action::ToolCall { id, .. } if id == &tc.id))
+                    .cloned()
+                    .collect();
+                if matching.is_empty() {
+                    None
+                } else {
+                    Some(matching)
+                }
+            });
+            let assistant_msg = Message {
                 role: Role::Assistant,
                 content: response.content.clone(),
-                tool_calls: response.tool_calls.clone(),
+                // DeepSeek 思考模式：必须把本轮的 reasoning_content 原样
+                // 保存在 assistant 消息里，供下一轮请求回传。
+                reasoning_content: response.reasoning_content.clone(),
+                tool_calls: assistant_tool_calls,
                 tool_call_id: None,
+            };
+            self.emit(AgentEvent::MessageAdded {
+                message: assistant_msg.clone(),
             });
+            messages.push(assistant_msg);
 
             // Record trace
             self.trace.push(TraceEntry {
@@ -174,14 +230,22 @@ impl AgentLoop {
 
             match guard_result {
                 GuardResult::Denied { reason, .. } => {
-                    return Err(HarnessError::GuardrailBlocked(reason));
+                    let err = HarnessError::GuardrailBlocked(reason);
+                    self.emit(AgentEvent::Finished {
+                        result: Err(err.to_string()),
+                    });
+                    return Err(err);
                 }
                 GuardResult::NeedsApproval { risk_level, reasons } => {
-                    return Err(HarnessError::GuardrailNeedsApproval(format!(
+                    let err = HarnessError::GuardrailNeedsApproval(format!(
                         "Risk level: {}. Reasons: {}",
                         risk_level,
                         reasons.join("; ")
-                    )));
+                    ));
+                    self.emit(AgentEvent::Finished {
+                        result: Err(err.to_string()),
+                    });
+                    return Err(err);
                 }
                 GuardResult::Allowed => {
                     // Proceed
@@ -190,11 +254,23 @@ impl AgentLoop {
 
             // d. Check for final answer
             if let Action::FinalAnswer { ref summary } = action {
-                return Ok((summary.clone(), messages));
+                let summary_str = summary.clone();
+                self.emit(AgentEvent::Finished {
+                    result: Ok(summary_str.clone()),
+                });
+                return Ok((summary_str, messages));
             }
 
             // e. Execute tool call
             if let Action::ToolCall { ref id, ref name, ref params } = action {
+                // 具体命令/参数摘要，开始与完成事件共用
+                let detail = tool_call_detail(name, params);
+                // Emit: tool call started（带具体命令/参数摘要）
+                self.emit(AgentEvent::ToolCallStarted {
+                    name: name.clone(),
+                    detail: detail.clone(),
+                });
+
                 let tool_ctx = ToolContext {
                     workspace_root: self.workspace_root.clone(),
                     command_timeout: std::time::Duration::from_secs(
@@ -206,11 +282,20 @@ impl AgentLoop {
                 let tool_result = match self.tools.execute(name, params, &tool_ctx) {
                     Ok(result) => result,
                     Err(e) => {
+                        // Emit: tool call failed
+                        let err_msg = format!("Error: {}", e);
+                        self.emit(AgentEvent::ToolCallCompleted {
+                            name: name.clone(),
+                            detail: detail.clone(),
+                            result_content: err_msg.clone(),
+                            success: false,
+                        });
                         // Inject the error as a tool result so the LLM can
                         // see it and potentially correct itself.
                         messages.push(Message {
                             role: Role::Tool,
-                            content: format!("Error: {}", e),
+                            content: err_msg,
+                            reasoning_content: None,
                             tool_calls: None,
                             tool_call_id: Some(id.clone()),
                         });
@@ -241,9 +326,17 @@ impl AgentLoop {
                     tool_content.push_str(&format_feedback_for_llm(&feedback_results));
                 }
 
+                self.emit(AgentEvent::ToolCallCompleted {
+                    name: name.clone(),
+                    detail,
+                    result_content: tool_content.clone(),
+                    success: tool_result.success,
+                });
+
                 messages.push(Message {
                     role: Role::Tool,
                     content: tool_content,
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(id.clone()),
                 });
@@ -252,22 +345,37 @@ impl AgentLoop {
             // h. Stop judgment (after the turn is processed)
             if self.stop_judgment(&action, turn, tokens_used) {
                 if let Action::FinalAnswer { summary } = action {
+                    self.emit(AgentEvent::Finished {
+                        result: Ok(summary.clone()),
+                    });
                     return Ok((summary, messages));
                 }
                 // If we hit max_turns or token budget without a final answer,
                 // return the last content as the answer
                 if turn + 1 >= max_turns {
-                    return Err(HarnessError::MaxTurnsReached);
+                    let err = HarnessError::MaxTurnsReached;
+                    self.emit(AgentEvent::Finished {
+                        result: Err(err.to_string()),
+                    });
+                    return Err(err);
                 }
                 if let Some(budget) = token_budget {
                     if tokens_used >= budget {
-                        return Err(HarnessError::TokenBudgetExhausted);
+                        let err = HarnessError::TokenBudgetExhausted;
+                        self.emit(AgentEvent::Finished {
+                            result: Err(err.to_string()),
+                        });
+                        return Err(err);
                     }
                 }
             }
         }
 
-        Err(HarnessError::MaxTurnsReached)
+        let err = HarnessError::MaxTurnsReached;
+        self.emit(AgentEvent::Finished {
+            result: Err(err.to_string()),
+        });
+        Err(err)
     }
 
     /// Determine whether the loop should stop after this turn.
@@ -297,6 +405,23 @@ impl AgentLoop {
     }
 }
 
+/// 从工具调用参数提取可读的命令/参数摘要：
+/// bash 显示命令行本身，其他工具显示紧凑 JSON；超长截断。
+/// 供事件发射与 REPL 历史标注共用。
+pub fn tool_call_detail(name: &str, params: &serde_json::Value) -> String {
+    const MAX_CHARS: usize = 120;
+    let raw = match (name, params.get("command")) {
+        ("bash", Some(serde_json::Value::String(cmd))) => cmd.clone(),
+        _ => serde_json::to_string(params).unwrap_or_default(),
+    };
+    if raw.chars().count() <= MAX_CHARS {
+        raw
+    } else {
+        let head: String = raw.chars().take(MAX_CHARS).collect();
+        format!("{}…", head)
+    }
+}
+
 // ============================================================================
 // Integration tests
 // ============================================================================
@@ -310,7 +435,7 @@ mod tests {
     use crate::guardrails::audit::AuditLog;
     use crate::guardrails::rules::StaticRuleEngine;
     use crate::guardrails::sandbox::SandboxBoundary;
-    use crate::guardrails::GuardrailPipeline;
+    use crate::guardrails::{ApprovalLevel, GuardrailPipeline};
     use crate::llm::mock::MockLlmProvider;
     use crate::memory::MemoryStore;
     use crate::tools::{Tool, ToolRegistry};
@@ -396,6 +521,7 @@ mod tests {
     fn content_response(content: &str) -> LlmResponse {
         LlmResponse {
             content: content.to_string(),
+            reasoning_content: None,
             finish_reason: FinishReason::Stop,
             usage: TokenUsage {
                 prompt_tokens: 10,
@@ -410,6 +536,7 @@ mod tests {
     fn tool_call_response(id: &str, name: &str, args: &str) -> LlmResponse {
         LlmResponse {
             content: String::new(),
+            reasoning_content: None,
             finish_reason: FinishReason::ToolCalls,
             usage: TokenUsage {
                 prompt_tokens: 10,
@@ -446,6 +573,7 @@ mod tests {
             config,
             minimal_context_builder(),
             PathBuf::from("/tmp/test"),
+            None, // no events in tests
         )
     }
 
@@ -491,6 +619,70 @@ mod tests {
         assert!(
             matches!(agent.trace()[1].action, Action::FinalAnswer { .. })
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Multiple tool calls in one response keep tool_call_id pairing
+    // -----------------------------------------------------------------------
+
+    /// DeepSeek and other strict APIs reject requests where an assistant
+    /// message carries tool_calls that are not each followed by a tool
+    /// message with the matching tool_call_id.  When the LLM returns
+    /// several tool calls in one response, only the first is executed —
+    /// the assistant message must therefore store only that one call, or
+    /// the next LLM request fails with HTTP 400.
+    #[tokio::test]
+    async fn test_agent_loop_multiple_tool_calls_keep_pairing() {
+        let mock = MockLlmProvider::new(vec![
+            LlmResponse {
+                content: String::new(),
+                reasoning_content: None,
+                finish_reason: FinishReason::ToolCalls,
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 10,
+                    total_tokens: 20,
+                },
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call-1".to_string(),
+                        name: "echo".to_string(),
+                        arguments: r#"{"message": "first"}"#.to_string(),
+                    },
+                    ToolCall {
+                        id: "call-2".to_string(),
+                        name: "echo".to_string(),
+                        arguments: r#"{"message": "second"}"#.to_string(),
+                    },
+                ]),
+            },
+            content_response("FINAL ANSWER: Only the first tool call ran."),
+        ]);
+        let mut agent = build_test_loop(mock, permissive_pipeline(), echo_registry(), empty_feedback());
+
+        let (result, messages) = agent.run_with_history("Two tool calls", &[]).await.unwrap();
+        assert_eq!(result, "Only the first tool call ran.");
+
+        // Every assistant message with tool_calls must be directly followed
+        // by a tool message answering each stored tool_call_id, with no
+        // intervening user/assistant message (API pairing invariant).
+        for (i, msg) in messages.iter().enumerate() {
+            if let Some(tcs) = &msg.tool_calls {
+                for tc in tcs {
+                    let answered = messages[i + 1..]
+                        .iter()
+                        .take_while(|n| {
+                            !matches!(n.role, Role::User | Role::Assistant)
+                        })
+                        .any(|n| n.tool_call_id.as_deref() == Some(tc.id.as_str()));
+                    assert!(
+                        answered,
+                        "tool_call_id {} is not answered by a following tool message",
+                        tc.id
+                    );
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -576,6 +768,7 @@ mod tests {
             config,
             minimal_context_builder(),
             PathBuf::from("/tmp/test"),
+            None,
         );
 
         let result = agent.run("Keep going").await;
@@ -747,6 +940,7 @@ mod tests {
             ApprovalGate::new(Duration::from_millis(1)),
             sandbox,
             AuditLog::new(PathBuf::from("/dev/null")),
+            ApprovalLevel::default(),
         );
 
         let mock = MockLlmProvider::new(vec![tool_call_response(
@@ -770,6 +964,7 @@ mod tests {
             config,
             minimal_context_builder(),
             PathBuf::from("/tmp/test"),
+            None,
         );
 
         let result = agent.run("Do something sensitive").await;
@@ -812,6 +1007,7 @@ mod tests {
             config,
             minimal_context_builder(),
             PathBuf::from("/tmp/test"),
+            None,
         );
 
         let result = agent.run("Use tokens").await;
@@ -824,5 +1020,30 @@ mod tests {
             HarnessError::TokenBudgetExhausted => {}
             other => panic!("expected TokenBudgetExhausted, got {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // tool_call_detail tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tool_call_detail_bash_extracts_command() {
+        let params = serde_json::json!({"command": "uname -a && ls"});
+        assert_eq!(tool_call_detail("bash", &params), "uname -a && ls");
+    }
+
+    #[test]
+    fn test_tool_call_detail_other_tool_shows_json() {
+        let params = serde_json::json!({"path": "src/main.rs"});
+        assert_eq!(tool_call_detail("read_file", &params), r#"{"path":"src/main.rs"}"#);
+    }
+
+    #[test]
+    fn test_tool_call_detail_truncates_long_command() {
+        let cmd = "x".repeat(300);
+        let params = serde_json::json!({"command": cmd});
+        let detail = tool_call_detail("bash", &params);
+        assert_eq!(detail.chars().count(), 121);
+        assert!(detail.ends_with('…'));
     }
 }

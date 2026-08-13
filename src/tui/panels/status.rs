@@ -1,42 +1,41 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::tui::app::AppState;
 
-/// Render the status bar: a single line at the bottom showing turn count,
-/// token usage, model, risk level, and running state.
+// 真彩色（白字深灰蓝底）：索引色 Color::White/DarkGray 随终端主题变化，
+// 浅色主题下白字浅灰底几乎不可读。真彩色两种主题下均清晰。
+const COLOR_STATUS_FG: Color = Color::Rgb(255, 255, 255);
+const COLOR_STATUS_BG: Color = Color::Rgb(51, 65, 85);
+
+/// 构建状态栏部件（渲染与测试共用）。
 ///
-/// Colors are determined by risk level:
-/// - Low / normal → Green
-/// - Medium        → Yellow
-/// - High / Critical → Red
-pub fn render(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let risk_color = match state.status.risk_level.to_lowercase().as_str() {
-        "high" | "critical" => Color::Red,
-        "medium" => Color::Yellow,
-        _ => Color::Green,
+/// 注意：状态栏区域只有 1 行高，不能使用带边框的 Block
+/// （上下边框各占 1 行，内容区高度归零导致文本不可见），
+/// 直接渲染单行文本 + 背景色。
+fn build_widget(state: &AppState) -> Paragraph<'_> {
+    let risk_cn = match state.status.risk_level.to_lowercase().as_str() {
+        "high" | "critical" => "高",
+        "medium" => "中",
+        _ => "低",
     };
 
-    let running_text = if state.running {
-        "Running..."
-    } else {
-        "Finished"
-    };
+    let running_text = if state.running { "运行中" } else { "已完成" };
 
     let status_text = format!(
-        "Turn: {} | Tokens: {} | Risk: {} | Model: {} | {}",
+        "轮次: {} | Token: {} | 风险: {} | 模型: {} | {}",
         state.status.turn,
         state.status.tokens_used,
-        state.status.risk_level,
+        risk_cn,
         state.status.model,
         running_text,
     );
 
     let guard_text = if !state.guard_requests.is_empty() {
         format!(
-            " | Pending approvals: {}",
+            " | 待审批: {}（按 y 批准 / n 拒绝）",
             state.guard_requests.len()
         )
     } else {
@@ -45,19 +44,16 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
 
     let full_text = format!("{}{}", status_text, guard_text);
 
-    let lines = vec![Line::from(Span::styled(
+    Paragraph::new(Text::from(vec![Line::from(Span::styled(
         full_text,
-        Style::default().fg(Color::White),
-    ))];
+        Style::default().fg(COLOR_STATUS_FG).bg(COLOR_STATUS_BG),
+    ))]))
+}
 
-    let widget = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .title("Status")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(risk_color)),
-        );
-
+/// Render the status bar: a single line at the bottom showing turn count,
+/// token usage, model, risk level, and running state.
+pub fn render(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let widget = build_widget(state);
     f.render_widget(widget, area);
 }
 
@@ -72,6 +68,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::widgets::Widget;
+    use unicode_width::UnicodeWidthStr;
 
     fn render_to_buffer(state: &AppState, width: u16, height: u16) -> Buffer {
         let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
@@ -80,56 +77,16 @@ mod tests {
         buffer
     }
 
-    fn build_widget(state: &AppState) -> Paragraph<'_> {
-        let risk_color = match state.status.risk_level.to_lowercase().as_str() {
-            "high" | "critical" => Color::Red,
-            "medium" => Color::Yellow,
-            _ => Color::Green,
-        };
-
-        let running_text = if state.running {
-            "Running..."
-        } else {
-            "Finished"
-        };
-
-        let status_text = format!(
-            "Turn: {} | Tokens: {} | Risk: {} | Model: {} | {}",
-            state.status.turn,
-            state.status.tokens_used,
-            state.status.risk_level,
-            state.status.model,
-            running_text,
-        );
-
-        let guard_text = if !state.guard_requests.is_empty() {
-            format!(" | Pending approvals: {}", state.guard_requests.len())
-        } else {
-            String::new()
-        };
-
-        let full_text = format!("{}{}", status_text, guard_text);
-
-        let lines = vec![Line::from(Span::styled(
-            full_text,
-            Style::default().fg(Color::White),
-        ))];
-
-        Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .title("Status")
-                    .borders(Borders::ALL)
-                    .style(Style::default().fg(risk_color)),
-            )
-    }
-
     fn buffer_to_string(buffer: &Buffer) -> String {
         let mut result = String::new();
         for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let cell = buffer.cell((x, y)).unwrap();
-                result.push_str(&cell.symbol());
+            let mut x = 0u16;
+            while x < buffer.area.width {
+                let symbol = buffer.cell((x, y)).unwrap().symbol().to_string();
+                // 宽字符（如中文）占 2 列，紧随其后的占位格符号为空格，
+                // 按显示宽度跳过，否则拼接结果会在每个汉字后多出一个空格。
+                x += symbol.width().max(1) as u16;
+                result.push_str(&symbol);
             }
             result.push('\n');
         }
@@ -139,36 +96,32 @@ mod tests {
     #[test]
     fn test_status_bar_default_state() {
         let state = AppState::new("gpt-4o");
-        let buffer = render_to_buffer(&state, 80, 3);
+        // 状态栏实际渲染区域为 1 行
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
 
         assert!(
-            content.contains("Status"),
-            "Expected 'Status' title, got: {}",
-            content
-        );
-        assert!(
-            content.contains("Turn: 0"),
+            content.contains("轮次: 0"),
             "Expected turn count, got: {}",
             content
         );
         assert!(
-            content.contains("Tokens: 0"),
+            content.contains("Token: 0"),
             "Expected token count, got: {}",
             content
         );
         assert!(
-            content.contains("Risk: Low"),
+            content.contains("风险: 低"),
             "Expected risk level, got: {}",
             content
         );
         assert!(
-            content.contains("Model: gpt-4o"),
+            content.contains("模型: gpt-4o"),
             "Expected model name, got: {}",
             content
         );
         assert!(
-            content.contains("Running..."),
+            content.contains("运行中"),
             "Expected running state, got: {}",
             content
         );
@@ -181,21 +134,21 @@ mod tests {
         state.status.turn = 5;
         state.status.tokens_used = 1234;
 
-        let buffer = render_to_buffer(&state, 80, 3);
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
 
         assert!(
-            content.contains("Finished"),
-            "Expected 'Finished', got: {}",
+            content.contains("已完成"),
+            "Expected '已完成', got: {}",
             content
         );
         assert!(
-            content.contains("Turn: 5"),
+            content.contains("轮次: 5"),
             "Expected turn 5, got: {}",
             content
         );
         assert!(
-            content.contains("Tokens: 1234"),
+            content.contains("Token: 1234"),
             "Expected token count, got: {}",
             content
         );
@@ -206,43 +159,52 @@ mod tests {
         // Test Low risk
         let mut state = AppState::new("gpt-4o");
         state.status.risk_level = "Low".to_string();
-        let buffer = render_to_buffer(&state, 80, 3);
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
         assert!(
-            content.contains("Risk: Low"),
+            content.contains("风险: 低"),
             "Expected Low risk, got: {}",
             content
         );
 
         // Test Medium risk
         state.status.risk_level = "Medium".to_string();
-        let buffer = render_to_buffer(&state, 80, 3);
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
         assert!(
-            content.contains("Risk: Medium"),
+            content.contains("风险: 中"),
             "Expected Medium risk, got: {}",
             content
         );
 
         // Test High risk
         state.status.risk_level = "High".to_string();
-        let buffer = render_to_buffer(&state, 80, 3);
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
         assert!(
-            content.contains("Risk: High"),
+            content.contains("风险: 高"),
             "Expected High risk, got: {}",
             content
         );
 
         // Test Critical risk
         state.status.risk_level = "Critical".to_string();
-        let buffer = render_to_buffer(&state, 80, 3);
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
         assert!(
-            content.contains("Risk: Critical"),
+            content.contains("风险: 高"),
             "Expected Critical risk, got: {}",
             content
         );
+    }
+
+    #[test]
+    fn test_status_bar_uses_truecolor_for_readability() {
+        let state = AppState::new("gpt-4o");
+        let buffer = render_to_buffer(&state, 80, 1);
+        let style = buffer.cell((0, 0)).unwrap().style();
+        assert_eq!(style.fg, Some(Color::Rgb(255, 255, 255)));
+        assert_eq!(style.bg, Some(Color::Rgb(51, 65, 85)));
     }
 
     #[test]
@@ -253,20 +215,25 @@ mod tests {
             "test".to_string(),
             "High".to_string(),
             vec![],
-        ));
+            None));
         state.add_guard_request(ApprovalRequest::new(
             "req-2".to_string(),
             "test2".to_string(),
             "Medium".to_string(),
             vec![],
-        ));
+            None));
 
-        let buffer = render_to_buffer(&state, 120, 3);
+        let buffer = render_to_buffer(&state, 120, 1);
         let content = buffer_to_string(&buffer);
 
         assert!(
-            content.contains("Pending approvals: 2"),
+            content.contains("待审批: 2"),
             "Expected pending approvals count, got: {}",
+            content
+        );
+        assert!(
+            content.contains("按 y 批准 / n 拒绝"),
+            "Expected approval hint, got: {}",
             content
         );
     }
@@ -281,12 +248,12 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
         };
 
-        let buffer = render_to_buffer(&state, 80, 3);
+        let buffer = render_to_buffer(&state, 80, 1);
         let content = buffer_to_string(&buffer);
 
-        assert!(content.contains("Turn: 42"));
-        assert!(content.contains("Tokens: 99999"));
-        assert!(content.contains("Risk: Medium"));
-        assert!(content.contains("Model: claude-sonnet-4-20250514"));
+        assert!(content.contains("轮次: 42"));
+        assert!(content.contains("Token: 99999"));
+        assert!(content.contains("风险: 中"));
+        assert!(content.contains("模型: claude-sonnet-4-20250514"));
     }
 }

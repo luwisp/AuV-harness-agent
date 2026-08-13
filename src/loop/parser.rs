@@ -115,6 +115,7 @@ mod tests {
     fn make_response(content: &str, tool_calls: Option<Vec<ToolCall>>) -> LlmResponse {
         LlmResponse {
             content: content.to_string(),
+            reasoning_content: None,
             finish_reason: FinishReason::Stop,
             usage: TokenUsage::default(),
             tool_calls,

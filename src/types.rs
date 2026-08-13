@@ -19,6 +19,10 @@ pub struct ToolCall {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// DeepSeek 思考模式要求：assistant 消息的 reasoning_content 必须在
+    /// 后续请求中原样传回，否则返回 HTTP 400。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
 }
@@ -73,6 +77,8 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmResponse {
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub finish_reason: FinishReason,
     pub usage: TokenUsage,
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -202,6 +208,7 @@ mod tests {
         let message = Message {
             role: Role::Assistant,
             content: "Running tests".to_string(),
+            reasoning_content: None,
             tool_calls: Some(vec![tool_call.clone()]),
             tool_call_id: Some("call-1".to_string()),
         };

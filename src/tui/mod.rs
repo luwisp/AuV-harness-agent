@@ -3,12 +3,13 @@ pub mod panels;
 
 use std::time::Duration;
 
-use crate::error::HarnessError;
 use crate::error::Result;
+use crate::events::AgentEvent;
+use crate::guardrails::approval::ApprovalDecision;
 use crate::r#loop::AgentLoop;
 use crate::types::{Message, Role};
 
-use app::{AppState, ApprovalRequest};
+use app::AppState;
 #[cfg(test)]
 use app::Focus;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -16,46 +17,6 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc;
-
-// ============================================================================
-// Agent events sent from the background agent task to the TUI event loop.
-// ============================================================================
-
-/// Messages sent from the background agent task to the TUI.
-#[derive(Debug)]
-#[allow(dead_code)]
-enum AgentEvent {
-    /// A new message was added to the conversation.
-    MessageAdded {
-        message: Message,
-    },
-    /// A tool call has started executing.
-    ToolCallStarted {
-        name: String,
-    },
-    /// A tool call has completed.
-    ToolCallCompleted {
-        name: String,
-        /// Content of the tool result.
-        result_content: String,
-        /// Whether the tool execution succeeded.
-        success: bool,
-    },
-    /// A guardrail approval is needed.
-    GuardrailApprovalNeeded {
-        request: ApprovalRequest,
-    },
-    /// Progress update (turn, tokens, risk level).
-    ProgressUpdate {
-        turn: usize,
-        tokens_used: u32,
-        risk_level: String,
-    },
-    /// The agent loop has finished executing.
-    Finished {
-        result: std::result::Result<String, HarnessError>,
-    },
-}
 
 // ============================================================================
 // Key actions — extracted for testability
@@ -94,25 +55,43 @@ fn handle_key(key: &KeyEvent, state: &AppState) -> KeyAction {
 
 /// Apply a key action to the application state, returning whether the TUI
 /// should exit.
-fn apply_key_action(action: KeyAction, state: &mut AppState) -> bool {
+///
+/// `decision_tx` 把护栏审批决定传回 `ApprovalGate`（事件模式），使
+/// y/n 按键真正驱动审批流程；测试传 `None` 时仅更新界面状态。
+fn apply_key_action(
+    action: KeyAction,
+    state: &mut AppState,
+    decision_tx: Option<&mpsc::Sender<ApprovalDecision>>,
+) -> bool {
     match action {
         KeyAction::Quit => {
             state.stop();
             true
         }
         KeyAction::ApproveGuardrail => {
-            // Remove the first pending guardrail request
+            // Remove the first pending guardrail request and notify the gate
             if let Some(req) = state.guard_requests.first() {
                 let id = req.id.clone();
                 state.remove_guard_request(&id);
+                if let Some(tx) = decision_tx {
+                    let _ = tx.try_send(ApprovalDecision::Approved {
+                        by: "user".to_string(),
+                        reason: Some("用户批准了该操作".to_string()),
+                    });
+                }
             }
             false
         }
         KeyAction::DenyGuardrail => {
-            // Remove the first pending guardrail request
+            // Remove the first pending guardrail request and notify the gate
             if let Some(req) = state.guard_requests.first() {
                 let id = req.id.clone();
                 state.remove_guard_request(&id);
+                if let Some(tx) = decision_tx {
+                    let _ = tx.try_send(ApprovalDecision::Denied {
+                        reason: "用户拒绝了该操作".to_string(),
+                    });
+                }
             }
             false
         }
@@ -139,19 +118,22 @@ fn apply_key_action(action: KeyAction, state: &mut AppState) -> bool {
 /// 1. Initializes the terminal (alternate screen, raw mode).
 /// 2. Spawns the agent loop in a background tokio task.
 /// 3. Runs the main event loop: draws panels, handles input.
-/// 4. On exit (q/ESC/Ctrl+C key or agent completion), restores the terminal.
+/// 4. On exit (q/ESC/Ctrl+C key), restores the terminal.
 ///
-/// Communication between the TUI and the agent loop uses a
-/// `tokio::sync::mpsc` channel.
-pub async fn run_tui(mut agent: AgentLoop, task: String) -> Result<()> {
-    // Channel for agent-to-TUI communication
-    let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
-
-    // Spawn the agent loop in a background task
+/// The TUI stays open after the agent finishes so the user can review
+/// results — press `q` to exit.
+pub async fn run_tui(
+    mut agent: AgentLoop,
+    task: String,
+    mut rx: mpsc::Receiver<AgentEvent>,
+    decision_tx: mpsc::Sender<ApprovalDecision>,
+    model: String,
+) -> Result<()> {
+    // Spawn the agent loop in a background task.
+    // Events are emitted through the channel inside AgentLoop (event_tx),
+    // so the spawned task just awaits the agent — no manual sends needed.
     let agent_handle = tokio::spawn(async move {
-        let result = agent.run(&task).await;
-        // Ignore send error — the TUI may have already exited
-        let _ = tx.send(AgentEvent::Finished { result }).await;
+        let _ = agent.run(&task).await;
     });
 
     // ---------- Terminal setup ----------
@@ -162,10 +144,11 @@ pub async fn run_tui(mut agent: AgentLoop, task: String) -> Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app_state = AppState::new("gpt-4o");
+    // 状态栏显示实际配置的模型（不再硬编码）
+    let mut app_state = AppState::new(&model);
 
     // ---------- Main event loop ----------
-    let exit_code = run_event_loop(&mut terminal, &mut rx, &mut app_state).await;
+    let exit_code = run_event_loop(&mut terminal, &mut rx, &mut app_state, &decision_tx).await;
 
     // ---------- Terminal cleanup ----------
     terminal::disable_raw_mode()?;
@@ -182,31 +165,45 @@ pub async fn run_tui(mut agent: AgentLoop, task: String) -> Result<()> {
 }
 
 /// Drive the main event loop: poll for input, check for agent events, draw.
+///
+/// The loop continues even after the agent finishes (channel disconnects),
+/// so the user can review results. Only user input (`q`/`Esc`/`Ctrl+C`)
+/// causes the loop to exit.
 async fn run_event_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     rx: &mut mpsc::Receiver<AgentEvent>,
     state: &mut AppState,
+    decision_tx: &mpsc::Sender<ApprovalDecision>,
 ) -> Result<()> {
+    let mut agent_done = false;
+
     loop {
-        // Check for agent events (non-blocking)
-        match rx.try_recv() {
-            Ok(event) => {
-                apply_agent_event(event, state);
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                // Channel closed unexpectedly — agent task must have panicked
-                state.running = false;
-                state.messages.push(Message {
-                    role: Role::System,
-                    content: "Agent task terminated unexpectedly".to_string(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-                terminal.draw(|f| draw_ui(f, state))?;
-                return Ok(());
-            }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                // No event yet — continue
+        // Check for agent events (non-blocking, skip if agent is done)
+        if !agent_done {
+            match rx.try_recv() {
+                Ok(event) => {
+                    let is_finished = matches!(event, AgentEvent::Finished { .. });
+                    apply_agent_event(event, state);
+                    if is_finished {
+                        agent_done = true;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // Agent task ended. If we never saw Finished, it crashed.
+                    if !agent_done {
+                        state.messages.push(Message {
+                            role: Role::System,
+                            content: "Agent task terminated unexpectedly".to_string(),
+                            reasoning_content: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                    }
+                    agent_done = true; // Stop polling the channel
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // No event yet — continue
+                }
             }
         }
 
@@ -214,7 +211,7 @@ async fn run_event_loop(
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 let action = handle_key(&key, state);
-                if apply_key_action(action, state) {
+                if apply_key_action(action, state, Some(decision_tx)) {
                     // User requested quit
                     return Ok(());
                 }
@@ -232,11 +229,18 @@ fn apply_agent_event(event: AgentEvent, state: &mut AppState) {
         AgentEvent::MessageAdded { message } => {
             state.messages.push(message);
         }
-        AgentEvent::ToolCallStarted { name } => {
-            state.set_current_tool(Some(name));
+        AgentEvent::ToolCallStarted { name, detail } => {
+            // 工具面板展示具体命令：bash 显示命令行，其余工具显示参数 JSON
+            let label = if detail.is_empty() {
+                name
+            } else {
+                format!("{}: {}", name, detail)
+            };
+            state.set_current_tool(Some(label));
         }
         AgentEvent::ToolCallCompleted {
             name: _name,
+            detail: _detail,
             result_content,
             success,
         } => {
@@ -267,6 +271,7 @@ fn apply_agent_event(event: AgentEvent, state: &mut AppState) {
                     state.messages.push(Message {
                         role: Role::Assistant,
                         content: summary,
+                        reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -275,6 +280,7 @@ fn apply_agent_event(event: AgentEvent, state: &mut AppState) {
                     state.messages.push(Message {
                         role: Role::System,
                         content: format!("Error: {}", e),
+                        reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -396,6 +402,7 @@ pub(crate) fn compute_layout(area: Rect) -> (Rect, Rect, Rect, Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::ApprovalRequest;
 
     // -----------------------------------------------------------------------
     // Layout tests
@@ -573,7 +580,7 @@ mod tests {
             "bash: rm -rf /tmp/test".to_string(),
             "High".to_string(),
             vec!["Destructive command".to_string()],
-        ));
+            None));
 
         // With guardrail requests, 'y' should approve
         assert_eq!(
@@ -589,42 +596,61 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_guardrail_approval_removes_request() {
+    fn test_apply_guardrail_approval_removes_request_and_notifies_gate() {
         let mut state = AppState::new("test-model");
         state.add_guard_request(ApprovalRequest::new(
             "req-1".to_string(),
             "test action".to_string(),
             "High".to_string(),
             vec!["reason".to_string()],
-        ));
+            None));
         assert_eq!(state.guard_requests.len(), 1);
 
-        // Apply approval should remove the request
-        let should_quit = apply_key_action(KeyAction::ApproveGuardrail, &mut state);
+        // Apply approval should remove the request and send the decision
+        // back to the approval gate through the decision channel.
+        let (tx, mut rx) = mpsc::channel(1);
+        let should_quit = apply_key_action(KeyAction::ApproveGuardrail, &mut state, Some(&tx));
         assert!(!should_quit);
         assert!(
             state.guard_requests.is_empty(),
             "Guardrail request should be removed after approval"
         );
+        let decision = rx.try_recv().expect("approval decision sent to gate");
+        assert_eq!(
+            decision,
+            ApprovalDecision::Approved {
+                by: "user".to_string(),
+                reason: Some("用户批准了该操作".to_string()),
+            }
+        );
     }
 
     #[test]
-    fn test_apply_guardrail_deny_removes_request() {
+    fn test_apply_guardrail_deny_removes_request_and_notifies_gate() {
         let mut state = AppState::new("test-model");
         state.add_guard_request(ApprovalRequest::new(
             "req-1".to_string(),
             "test action".to_string(),
             "High".to_string(),
             vec!["reason".to_string()],
-        ));
+            None));
         assert_eq!(state.guard_requests.len(), 1);
 
-        // Apply denial should remove the request
-        let should_quit = apply_key_action(KeyAction::DenyGuardrail, &mut state);
+        // Apply denial should remove the request and send the decision
+        // back to the approval gate through the decision channel.
+        let (tx, mut rx) = mpsc::channel(1);
+        let should_quit = apply_key_action(KeyAction::DenyGuardrail, &mut state, Some(&tx));
         assert!(!should_quit);
         assert!(
             state.guard_requests.is_empty(),
             "Guardrail request should be removed after denial"
+        );
+        let decision = rx.try_recv().expect("denial decision sent to gate");
+        assert_eq!(
+            decision,
+            ApprovalDecision::Denied {
+                reason: "用户拒绝了该操作".to_string(),
+            }
         );
     }
 
@@ -633,7 +659,7 @@ mod tests {
         let mut state = AppState::new("test-model");
         assert!(state.running);
 
-        let should_quit = apply_key_action(KeyAction::Quit, &mut state);
+        let should_quit = apply_key_action(KeyAction::Quit, &mut state, None);
         assert!(should_quit);
         assert!(!state.running);
     }
@@ -643,23 +669,23 @@ mod tests {
         let mut state = AppState::new("test-model");
         assert_eq!(state.focus, Focus::Conversation);
 
-        apply_key_action(KeyAction::SwitchFocus, &mut state);
+        apply_key_action(KeyAction::SwitchFocus, &mut state, None);
         assert_eq!(state.focus, Focus::Tools);
 
-        apply_key_action(KeyAction::SwitchFocus, &mut state);
+        apply_key_action(KeyAction::SwitchFocus, &mut state, None);
         assert_eq!(state.focus, Focus::Guardrails);
 
-        apply_key_action(KeyAction::SwitchFocus, &mut state);
+        apply_key_action(KeyAction::SwitchFocus, &mut state, None);
         assert_eq!(state.focus, Focus::Status);
 
-        apply_key_action(KeyAction::SwitchFocus, &mut state);
+        apply_key_action(KeyAction::SwitchFocus, &mut state, None);
         assert_eq!(state.focus, Focus::Conversation);
     }
 
     #[test]
     fn test_apply_key_action_confirm_noop() {
         let mut state = AppState::new("test-model");
-        let should_quit = apply_key_action(KeyAction::Confirm, &mut state);
+        let should_quit = apply_key_action(KeyAction::Confirm, &mut state, None);
         assert!(!should_quit);
         assert!(state.running);
     }
@@ -667,7 +693,7 @@ mod tests {
     #[test]
     fn test_apply_key_action_none_noop() {
         let mut state = AppState::new("test-model");
-        let should_quit = apply_key_action(KeyAction::None, &mut state);
+        let should_quit = apply_key_action(KeyAction::None, &mut state, None);
         assert!(!should_quit);
         assert!(state.running);
     }
@@ -682,6 +708,7 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: "Hello".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         };
@@ -698,10 +725,11 @@ mod tests {
         apply_agent_event(
             AgentEvent::ToolCallStarted {
                 name: "bash".to_string(),
+                detail: "uname -a".to_string(),
             },
             &mut state,
         );
-        assert_eq!(state.current_tool, Some("bash".to_string()));
+        assert_eq!(state.current_tool, Some("bash: uname -a".to_string()));
     }
 
     #[test]
@@ -712,6 +740,7 @@ mod tests {
         apply_agent_event(
             AgentEvent::ToolCallCompleted {
                 name: "bash".to_string(),
+                detail: "uname -a".to_string(),
                 result_content: "echo: hello".to_string(),
                 success: true,
             },
@@ -732,7 +761,7 @@ mod tests {
             "test action".to_string(),
             "High".to_string(),
             vec!["reason".to_string()],
-        );
+        None);
 
         apply_agent_event(
             AgentEvent::GuardrailApprovalNeeded {
@@ -788,7 +817,7 @@ mod tests {
 
         apply_agent_event(
             AgentEvent::Finished {
-                result: Err(HarnessError::MaxTurnsReached),
+                result: Err("MaxTurnsReached".to_string()),
             },
             &mut state,
         );
@@ -831,12 +860,14 @@ mod tests {
         state.messages.push(Message {
             role: Role::User,
             content: "task".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
         state.messages.push(Message {
             role: Role::Assistant,
             content: "done".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });

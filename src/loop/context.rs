@@ -69,14 +69,20 @@ impl ContextBuilder {
 
     /// Build the full message list for an LLM call.
     ///
-    /// The returned vector always starts with a system message that combines
-    /// the system prompt, tool menu, rules, and memory index.  It is followed
-    /// by a user message containing the task, and then any existing
-    /// conversation history (assistant/tool messages from previous turns).
+    /// The returned vector contains, in chronological order:
+    ///
+    /// 1. A system message (combined prompt, tool menu, rules, skills, memory).
+    /// 2. Existing conversation history (User, Assistant, and Tool messages
+    ///    from previous turns — must include User messages to form a valid
+    ///    alternating conversation).
+    /// 3. The current user task as a new User message.
+    ///
+    /// This ordering ensures the LLM sees the conversation in the correct
+    /// temporal sequence: old task → old response → new task.
     pub fn build(&self, messages: &[Message], user_task: &str) -> Vec<Message> {
         let mut result = Vec::new();
 
-        // System message: combine all context fragments
+        // 1. System message: combine all context fragments
         let mut system_content = self.system_prompt.clone();
 
         if !self.tool_menu.is_empty() {
@@ -101,20 +107,22 @@ impl ContextBuilder {
         result.push(Message {
             role: Role::System,
             content: system_content,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
 
-        // User task
+        // 2. Existing conversation history (in chronological order)
+        result.extend_from_slice(messages);
+
+        // 3. Current user task (always last — the newest message)
         result.push(Message {
             role: Role::User,
             content: user_task.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
-
-        // Existing conversation
-        result.extend_from_slice(messages);
 
         result
     }
@@ -183,14 +191,23 @@ mod tests {
         let builder = make_builder();
         let existing = vec![
             Message {
+                role: Role::User,
+                content: "Read the main file".to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
                 role: Role::Assistant,
                 content: "I'll read the file first.".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             },
             Message {
                 role: Role::Tool,
                 content: "File contents here...".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some("call-1".to_string()),
             },
@@ -198,12 +215,22 @@ mod tests {
 
         let messages = builder.build(&existing, "Continue");
 
-        // System + User + 2 existing
-        assert_eq!(messages.len(), 4);
+        // System + 3 existing (User, Assistant, Tool) + User("Continue") = 5
+        assert_eq!(messages.len(), 5);
+        // messages[0] = System
+        assert_eq!(messages[0].role, Role::System);
+        // messages[1] = User from history
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[1].content, "Read the main file");
+        // messages[2] = Assistant from history
         assert_eq!(messages[2].role, Role::Assistant);
         assert_eq!(messages[2].content, "I'll read the file first.");
+        // messages[3] = Tool from history
         assert_eq!(messages[3].role, Role::Tool);
         assert_eq!(messages[3].content, "File contents here...");
+        // messages[4] = User (new task)
+        assert_eq!(messages[4].role, Role::User);
+        assert_eq!(messages[4].content, "Continue");
     }
 
     #[test]
