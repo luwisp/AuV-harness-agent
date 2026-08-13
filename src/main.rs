@@ -79,7 +79,7 @@ enum Commands {
         no_tui: bool,
     },
 
-    /// 初始化 AuV 配置（./.AuV/config.toml、.memory 目录、API 密钥）
+    /// 初始化 AuV 配置（./.AuV/config.toml、./.AuV/memory 目录、API 密钥）
     Init,
 
     /// Manage API keys
@@ -434,7 +434,7 @@ async fn run_repl(
     let mut rl = DefaultEditor::new().map_err(|e| {
         harness_agent::error::HarnessError::Config(format!("rustyline 初始化失败: {}", e))
     })?;
-    let history_path = PathBuf::from(".harness/repl_history.txt");
+    let history_path = PathBuf::from(".AuV/repl_history.txt");
     let _ = rl.load_history(&history_path);
 
     // 清屏并重绘界面：横幅 +（如有）恢复的完整历史
@@ -1329,9 +1329,9 @@ fn resume_session_interactively(
 /// 自动保存会话的文件名（不含扩展名）。
 const AUTOSAVE_NAME: &str = "autosave";
 
-/// 会话文件存储目录。
+/// 会话文件存储目录（AuV 数据统一收纳在 .AuV/ 下）。
 fn sessions_dir() -> PathBuf {
-    PathBuf::from(".harness/sessions")
+    PathBuf::from(".AuV/sessions")
 }
 
 /// 将会话保存为 JSON 文件。
@@ -1853,15 +1853,15 @@ async fn run_init() -> Result<()> {
         println!("已创建配置：{}", config_path.display());
     }
 
-    // 2. 创建 .memory 目录
-    let memory_path = PathBuf::from(".memory");
+    // 2. 创建记忆目录（AuV 数据统一收纳在 .AuV/ 下）
+    let memory_path = PathBuf::from(".AuV/memory");
     if !memory_path.exists() {
         std::fs::create_dir_all(&memory_path)?;
         let index_path = memory_path.join("MEMORY.md");
         std::fs::write(&index_path, "# Memory Index\n\n")?;
-        println!("已创建 .memory/ 目录。");
+        println!("已创建 .AuV/memory/ 目录。");
     } else {
-        println!(".memory/ 目录已存在。");
+        println!(".AuV/memory/ 目录已存在。");
     }
 
     // 3. 可选：设置 API 密钥

@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-08-14：数据目录统一收纳到 .AuV + 护栏审批管线修复
+
+### 1. 数据目录统一收纳到 .AuV/
+
+- 项目级运行时数据不再分散：`.harness/sessions/` → `.AuV/sessions/`、`.harness/repl_history.txt` → `.AuV/repl_history.txt`、`.harness/audit.jsonl` → `.AuV/audit.jsonl`、`.memory/` → `.AuV/memory/`（`MEMORY.md`）
+- 一次性手动迁移（用户选择不做运行时迁移逻辑）：现有会话、历史、审计、记忆数据已搬入 `.AuV/`，旧目录删除
+- 配置默认值同步：`[guardrails] audit_log_path` 默认 `.AuV/audit.jsonl`、`[memory] storage_path` 默认 `.AuV/memory`
+- `auv init` 创建 `.AuV/memory/`（提示文案同步）；全局 `~/.AuV/` 不变
+- `.gitignore` 保留 `.harness/`、`.memory/` 条目，防止旧版二进制产生的旧目录被误提交
+
+### 2. 护栏审批管线修复（真实会话审计日志定位）
+
+- **沙箱硬校验先于审批**：参数级违规（超时超限、禁用命令等）在审批前直接拦截，修复「用户批准后又被拦截」的假批准
+- **每条动作恰好一条审计记录**：修复批准后追加 `Low/Allowed` 造成的 `High/Approved + Low/Blocked` 双记录与风险等级矛盾；`Blocked` 记录使用真实评估风险等级
+- **护栏拒绝注入反馈回路**：拒绝原因作为 Tool 结果注入消息，LLM 看到后调整操作重试（`max_turns` 兜底），不再直接终止整个 run
+- **失败路径也保存会话**：run 失败时用户任务 + 已收集助手消息仍追加保存（清除无配对 `tool_calls`），修复护栏拦截后整段对话丢失
+
+### 3. 记忆功能现状检查
+
+- 读侧已启用：`MEMORY.md` 注入系统提示词、每轮 `load_all` 加载；配置默认 `enabled = true`
+- 写侧缺失：`MemoryStore::write()` 无任何调用点，agent 无法保存记忆（后续可选任务：`/remember` 命令或循环内自动记忆）
+
+---
+
 ## 2026-08-13：项目更名 AuV + 两级配置系统 + AuV.md 角色说明
 
 ### 1. 项目更名 AuV harness agent（简称 AuV）

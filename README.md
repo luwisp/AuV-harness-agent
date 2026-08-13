@@ -64,7 +64,7 @@ AuV harness agent REPL v0.1.0
 **REPL 输入体验（rustyline）：**
 
 - 输入行上方常驻**状态行**：`模型: gpt-4o | Token: 1,234 | 上下文剩余: 99%（126,766/128,000）`，模型与上下文窗口按当前配置显示，Token 为全会话累计值（每轮结束后刷新）
-- `↑` / `↓`：浏览输入历史（跨会话持久化到 `.harness/repl_history.txt`）
+- `↑` / `↓`：浏览输入历史（跨会话持久化到 `.AuV/repl_history.txt`）
 - `←` / `→`：行内移动光标编辑
 - `Ctrl+A` / `Ctrl+E`：跳到行首 / 行尾
 - `Ctrl+C`：退出 REPL
@@ -95,7 +95,7 @@ AuV harness agent REPL v0.1.0
 
 **REPL 特性：**
 
-- **自动保存（模型起名）**：发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（不超过 12 字），会话自动保存到 `.harness/sessions/<标题>.json`；标题生成失败时回退到 `autosave.json`。后续每轮对话自动按当前标题续存。默认启动开启新会话，`auv --resume` 启动时恢复最近修改的会话，无需手动 `/save`。
+- **自动保存（模型起名）**：发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（不超过 12 字），会话自动保存到 `.AuV/sessions/<标题>.json`；标题生成失败时回退到 `autosave.json`。后续每轮对话自动按当前标题续存。默认启动开启新会话，`auv --resume` 启动时恢复最近修改的会话，无需手动 `/save`。
 - **界面重绘**：启动、`/resume`、`/clear` 后自动清屏并重绘界面；清屏同时清空终端滚动缓冲区（`\x1b[3J`），向上滚动不会再看到重复的历史记录；`/resume` 交互选择完成后清理选择列表，不留过期信息。
 - **用户消息块**：发送任务后输入行原位替换为彩色用户消息块，任务以对话消息形式留在屏幕与历史中。
 - **完整历史**：恢复会话时完整打印全部消息（带灰色序号 `[n]`），工具结果限 12 行并标注 `/view` 提示；`/history` 显示全部，`/view <编号>` 查看单条消息全文。
@@ -199,7 +199,7 @@ auv init
 
 交互式引导会：
 1. 创建 `./.AuV/config.toml` — 项目局部配置（当前目录为 home 时创建全局配置）
-2. 创建 `.memory/` — 记忆存储目录
+2. 创建 `.AuV/memory/` — 记忆存储目录
 3. 引导你输入 API Key（隐藏回显）
 
 ### 两级配置
@@ -343,7 +343,7 @@ enabled = true                               # 启用护栏
 rules_file = "rules.md"                      # 规则文件路径
 approval_timeout_secs = 120                  # 审批超时
 approval_level = "low"                       # 审批力度：none/low/medium/high（见护栏章节）
-audit_log_path = ".harness/audit.jsonl"     # 审计日志路径
+audit_log_path = ".AuV/audit.jsonl"     # 审计日志路径
 
 [sandbox]
 enabled = true
@@ -360,7 +360,7 @@ forbidden_commands = [                       # 命令黑名单
 disabled_tools = []                          # 禁用某些工具（如 ["bash"]）
 
 [memory]
-storage_path = ".memory"                     # 记忆存储路径
+storage_path = ".AuV/memory"                     # 记忆存储路径
 
 [feedback]
 enabled = true
@@ -422,7 +422,7 @@ Agent 会在 relevant 时自动读取完整 skill 内容。REPL 中用 `/skills`
 | L3 | 人工审批 | 工具调用风险超过审批力度阈值时暂停，等待 y/n | 审批超时自动拒绝 |
 | L4 | 沙箱边界 | 工作目录限制、命令黑白名单 | 写 `/etc/` → 拒绝 |
 
-所有护栏决策写入 `.harness/audit.jsonl`。
+所有护栏决策写入 `.AuV/audit.jsonl`。
 
 ### 审批力度（L3 阈值）
 

@@ -114,9 +114,9 @@ fn default_temperature() -> f32 { 0.7 }
 fn default_timeout() -> u64 { 120 }
 fn default_true() -> bool { true }
 fn default_approval_timeout() -> u64 { 120 }
-fn default_audit_log() -> PathBuf { PathBuf::from(".harness/audit.jsonl") }
+fn default_audit_log() -> PathBuf { PathBuf::from(".AuV/audit.jsonl") }
 fn default_max_timeout() -> u64 { 300 }
-fn default_memory_path() -> PathBuf { PathBuf::from(".memory") }
+fn default_memory_path() -> PathBuf { PathBuf::from(".AuV/memory") }
 fn default_max_entries() -> usize { 1000 }
 fn default_max_retries() -> usize { 3 }
 fn default_max_turns() -> usize { 50 }

@@ -28,7 +28,7 @@ System 消息始终在第一位，包含系统提示、工具菜单、规则、�
 
 REPL 支持 `/save <name>`、`/resume`、`/sessions`、`/rename <标题>`、`/model` 命令，类似 Claude Code 的多对话管理：
 
-- 会话保存为 `.harness/sessions/<name>.json`
+- 会话保存为 `.AuV/sessions/<name>.json`
 - 使用 serde_json 序列化 `Vec<Message>`
 - `/resume <name>` 从文件加载并替换当前对话历史
 - `/resume` 不带参数时列出所有会话（编号 + 消息数），输入编号或名称交互选择；空输入 / `q` / `quit` / `取消` / `Ctrl+C` 取消返回原对话（重绘原界面），无效编号提示后重新选择
@@ -85,14 +85,14 @@ AuV harness agent REPL v0.1.0
 
 使用 rustyline 15 提供完整行编辑能力：
 
-- `↑`/`↓` 输入历史导航（持久化到 `.harness/repl_history.txt`）
+- `↑`/`↓` 输入历史导航（持久化到 `.AuV/repl_history.txt`）
 - `←`/`→` 行内光标编辑
 - `Ctrl+C` 退出 REPL（ReadlineError::Interrupted → break）
 - `Ctrl+D` 退出（ReadlineError::Eof）
 
 ### 6. 自动保存（模型起名）
 
-- 发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（≤12 字，`generate_conversation_title`：OpenAiProvider 单轮调用 + 标题 system prompt），保存到 `.harness/sessions/<标题>.json`；标题生成失败（网络/API 错误）回退 `autosave`，并给出黄色警告
+- 发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（≤12 字，`generate_conversation_title`：OpenAiProvider 单轮调用 + 标题 system prompt），保存到 `.AuV/sessions/<标题>.json`；标题生成失败（网络/API 错误）回退 `autosave`，并给出黄色警告
 - 后续每轮对话自动按当前标题续存
 - 默认启动开启新会话；`auv --resume` 启动时恢复**最近修改**的会话（按文件 mtime 选择，跳过损坏文件）
 - REPL 内 `/resume` 命令仍可随时恢复任意会话
@@ -156,6 +156,6 @@ AuV harness agent REPL v0.1.0
 - [x] 上下文窗口按模型家族识别（gpt-4/5/o 与 claude 128k、deepseek 64k、llama/qwen/glm 32k，未知回退 token_budget）
 - [x] 护栏审批改 REPL 事件模式：审批块独立行打印、y/n 经决定通道发回、审批结束全屏重绘清除（含本轮助手消息重印），回归测试禁止 DECSC/DECRC
 - [x] 审批期间 Ctrl+C 视为拒绝（`tokio::signal::ctrl_c()` 监听，不再杀死进程）；行结束 `\r` 容错；审批竞态残留经 `approval_pending` 补重绘
-- [x] 项目更名 AuV：二进制 `auv`、横幅/CLI/默认提示词品牌化；`.harness` 数据目录与内部类型名保持
+- [x] 项目更名 AuV：二进制 `auv`、横幅/CLI/默认提示词品牌化；`.harness` 数据目录与内部类型名保持（2026-08-14 起统一收纳到 `.AuV/`）
 - [x] 两级配置：`~/.AuV/config.toml`（全局）与 `./.AuV/config.toml`（项目，cwd 为 home 时跳过），启动自动创建（存在不改）、字段级合并（局部覆盖全局）、旧版 config.toml 迁移提示
 - [x] AuV.md 角色说明：全局（`~/.AuV/AuV.md`）与项目（`./AuV.md`）两级检测，兼容已有 CLAUDE.md/AGENTS.md，叠加到默认提示词，内联 `[agent] system_prompt` 最高优先
