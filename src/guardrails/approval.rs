@@ -456,7 +456,8 @@ struct ApprovalTerminalMode {
 
 impl ApprovalTerminalMode {
     fn enter(fd: libc::c_int) -> Self {
-        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // Some libc layouts contain reserved bytes that tcgetattr leaves untouched.
+        let mut original = std::mem::MaybeUninit::<libc::termios>::zeroed();
         if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
             return Self { fd, original: None };
         }
@@ -631,7 +632,7 @@ mod tests {
 
     #[cfg(unix)]
     fn terminal_mode(fd: libc::c_int) -> libc::termios {
-        let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let mut mode = std::mem::MaybeUninit::<libc::termios>::zeroed();
         let result = unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) };
         assert_eq!(
             result,
