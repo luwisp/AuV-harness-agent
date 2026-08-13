@@ -1,4 +1,4 @@
-# HarnessAgent — Coding Agent Harness
+# AuV harness agent — Coding Agent Harness
 
 > 将 LLM 封装成一台能稳定、可靠执行软件工程任务的完整系统。核心理念：**Agent = LLM + Harness**。
 
@@ -20,24 +20,24 @@
 
 ## 三种运行模式
 
-`harness` 有三种截然不同的交互方式，按场景选择：
+`auv` 有三种截然不同的交互方式，按场景选择：
 
 | 模式 | 命令 | 适用场景 |
 |------|------|---------|
-| **交互式 REPL** | `harness` | 日常使用，多轮对话，持续编码 |
-| **TUI 模式** | `harness run "任务"` | 单次任务，需要可视化面板 |
-| **纯文本模式** | `harness run --no-tui "任务"` | CI/脚本/管道，不需终端 |
+| **交互式 REPL** | `auv` | 日常使用，多轮对话，持续编码 |
+| **TUI 模式** | `auv run "任务"` | 单次任务，需要可视化面板 |
+| **纯文本模式** | `auv run --no-tui "任务"` | CI/脚本/管道，不需终端 |
 
 ### 模式 1：交互式 REPL（推荐日常使用）
 
 ```bash
-harness
+auv
 ```
 
-不带任何参数直接启动，进入类似 Claude Code 的交互式对话循环。**默认开启新会话**；需要接着上次的对话时用 `harness --resume` 启动（恢复自动保存的会话）。
+不带任何参数直接启动，进入类似 Claude Code 的交互式对话循环。**默认开启新会话**；需要接着上次的对话时用 `auv --resume` 启动（恢复自动保存的会话）。
 
 ```
-HarnessAgent REPL v0.1.0
+AuV harness agent REPL v0.1.0
 输入任务开始对话，/help 查看命令，/exit 退出
 （暂无对话历史）
 ────────────────────────────────────────────────
@@ -59,7 +59,7 @@ HarnessAgent REPL v0.1.0
 
 **彩色输出：** 角色标签为彩色背景块——用户蓝底白字、助手绿底白字、工具紫底白字、系统灰底白字；消息序号 `[n]`、工具调用标注（`（工具调用：…）`）、分隔线等辅助信息为灰色，失败内容红色显示。标签采用 24 位真彩色（如 `48;2;37;99;235`），不依赖终端浅色/深色主题，任何背景下均清晰可读。历史展示与实时输出使用完全相同的消息块风格。
 
-**完整历史：** `harness --resume` 启动与 `/resume` 命令恢复会话后**完整打印全部历史**（用户/助手消息不截断，工具结果限 12 行、超出标注省略），靠终端滚动条回看——对标 Claude Code 转录模式与 Codex resume。`/history` 显示全部消息（`/history 5` 只看最近 5 条）；`/view <编号>` 查看单条消息全文。
+**完整历史：** `auv --resume` 启动与 `/resume` 命令恢复会话后**完整打印全部历史**（用户/助手消息不截断，工具结果限 12 行、超出标注省略），靠终端滚动条回看——对标 Claude Code 转录模式与 Codex resume。`/history` 显示全部消息（`/history 5` 只看最近 5 条）；`/view <编号>` 查看单条消息全文。
 
 **REPL 输入体验（rustyline）：**
 
@@ -95,7 +95,7 @@ HarnessAgent REPL v0.1.0
 
 **REPL 特性：**
 
-- **自动保存（模型起名）**：发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（不超过 12 字），会话自动保存到 `.harness/sessions/<标题>.json`；标题生成失败时回退到 `autosave.json`。后续每轮对话自动按当前标题续存。默认启动开启新会话，`harness --resume` 启动时恢复最近修改的会话，无需手动 `/save`。
+- **自动保存（模型起名）**：发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（不超过 12 字），会话自动保存到 `.harness/sessions/<标题>.json`；标题生成失败时回退到 `autosave.json`。后续每轮对话自动按当前标题续存。默认启动开启新会话，`auv --resume` 启动时恢复最近修改的会话，无需手动 `/save`。
 - **界面重绘**：启动、`/resume`、`/clear` 后自动清屏并重绘界面；清屏同时清空终端滚动缓冲区（`\x1b[3J`），向上滚动不会再看到重复的历史记录；`/resume` 交互选择完成后清理选择列表，不留过期信息。
 - **用户消息块**：发送任务后输入行原位替换为彩色用户消息块，任务以对话消息形式留在屏幕与历史中。
 - **完整历史**：恢复会话时完整打印全部消息（带灰色序号 `[n]`），工具结果限 12 行并标注 `/view` 提示；`/history` 显示全部，`/view <编号>` 查看单条消息全文。
@@ -108,7 +108,7 @@ HarnessAgent REPL v0.1.0
 ### 模式 2：TUI 模式（可视化面板）
 
 ```bash
-harness run "你的任务"
+auv run "你的任务"
 ```
 
 在终端中启动时，默认进入 TUI 模式（除非加了 `--no-tui` 或 stdout 不是终端）。**Agent 运行完毕后 TUI 保持打开**，你可查看完整的工具调用记录和对话历史，按 `q` 退出：
@@ -141,13 +141,13 @@ harness run "你的任务"
 ### 模式 3：纯文本模式（脚本/CI/管道）
 
 ```bash
-harness run --no-tui "运行 cargo test 并修复失败的测试"
+auv run --no-tui "运行 cargo test 并修复失败的测试"
 ```
 
 纯文本输出，不依赖终端能力。适合：
 - CI/CD 流水线
 - 脚本自动化
-- 管道重定向（`harness run "task" > output.txt`）
+- 管道重定向（`auv run "task" > output.txt`）
 
 ---
 
@@ -165,10 +165,10 @@ harness run --no-tui "运行 cargo test 并修复失败的测试"
 cargo build --release
 
 # 2. 初始化（首次运行，创建配置 + 录入 key）
-./target/release/harness init
+./target/release/auv init
 
 # 3. 开始使用
-./target/release/harness
+./target/release/auv
 ```
 
 ---
@@ -181,26 +181,40 @@ cargo build --release
 git clone <repo-url>
 cd harnessAgent
 cargo build --release
-./target/release/harness --help
+./target/release/auv --help
 ```
 
 ### Docker
 
 ```bash
-docker build -t harness-agent .
-docker run -it harness-agent
+docker build -t auv-harness-agent .
+docker run -it auv-harness-agent
 ```
 
 ### 初始化
 
 ```bash
-harness init
+auv init
 ```
 
 交互式引导会：
-1. 创建 `config.toml` — 可选的配置文件
+1. 创建 `./AuV/config.toml` — 项目局部配置（当前目录为 home 时创建全局配置）
 2. 创建 `.memory/` — 记忆存储目录
 3. 引导你输入 API Key（隐藏回显）
+
+### 两级配置
+
+AuV 使用「全局 + 项目」两级配置，**启动时自动创建，已存在则绝不改动**：
+
+| 层级 | 路径 | 作用 |
+|------|------|------|
+| 全局 | `~/AuV/config.toml` | 用户级默认值（默认模型、默认审批力度等） |
+| 项目 | `./AuV/config.toml` | 项目级覆盖（当前目录为 home 时跳过） |
+
+- **字段级合并**：项目配置写了哪个字段就覆盖哪个，未写的继承全局
+- **显式指定**：`auv run -c <路径> "任务"` 只读指定文件，不走分层
+- **旧版迁移**：项目根 `config.toml` 不再加载，启动时提示迁移
+- **角色说明**：`AuV.md` 用于加载角色说明——项目内按 `AuV.md` → `CLAUDE.md` → `AGENTS.md` 取第一个存在的文件（已有这些文件的项目无需改名）；全局对应 `~/AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`。两级叠加到默认提示词之后，配置内联 `[agent] system_prompt` 优先级最高
 
 ---
 
@@ -209,31 +223,31 @@ harness init
 ### 密钥管理
 
 ```bash
-harness key status       # 查看已配置哪些 key（不显示明文）
-harness key set          # 交互式录入（隐藏回显）
-harness key clear <名称>  # 删除存储的 key
+auv key status       # 查看已配置哪些 key（不显示明文）
+auv key set          # 交互式录入（隐藏回显）
+auv key clear <名称>  # 删除存储的 key
 ```
 
 存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到 AES-256-GCM 加密文件。
 
 ### 设置 API Key 的其他方式
 
-除了 `harness key set`，也可以：
+除了 `auv key set`，也可以：
 
 ```bash
-# 环境变量（优先级低于 config.toml）
+# 环境变量（优先级低于 ./AuV/config.toml）
 export OPENAI_API_KEY="sk-your-key"
 ```
 
 ```toml
-# config.toml（优先级最高）
+# ./AuV/config.toml（优先级最高）
 [llm]
 api_key = "sk-your-key"
 ```
 
 ### 使用兼容 API（DeepSeek / Groq / Ollama / vLLM）
 
-任何兼容 OpenAI Chat Completions 格式的服务都能用，只需改 `config.toml`：
+任何兼容 OpenAI Chat Completions 格式的服务都能用，只需改 `./AuV/config.toml` 或 `~/AuV/config.toml`：
 
 **DeepSeek：**
 ```toml
@@ -266,47 +280,47 @@ api_key = "ollama"   # Ollama 不需要真实 key，但字段不能为空
 ### 所有 CLI 入口总览
 
 ```
-harness                       交互式 REPL（默认新会话）
-harness --resume              交互式 REPL（恢复上次自动保存的会话）
-harness run "task"            TUI 模式单次任务
-harness run --no-tui "task"   纯文本单次任务（CI/脚本）
-harness run -c cfg.toml "t"   使用自定义配置
-harness init                  初始化配置
-harness key status            查看 key 配置
-harness key set               录入 key
-harness key clear <name>     删除 key
-harness --help                查看所有命令
-harness --version             查看版本
+auv                       交互式 REPL（默认新会话）
+auv --resume              交互式 REPL（恢复上次自动保存的会话）
+auv run "task"            TUI 模式单次任务
+auv run --no-tui "task"   纯文本单次任务（CI/脚本）
+auv run -c cfg.toml "t"   使用自定义配置
+auv init                  初始化配置
+auv key status            查看 key 配置
+auv key set               录入 key
+auv key clear <name>     删除 key
+auv --help                查看所有命令
+auv --version             查看版本
 ```
 
 ### 示例
 
 ```bash
 # REPL — 日常编程
-harness
+auv
 
 # 单次 — 查看并修复 bug
-harness run "src/auth.rs 中的登录函数在空密码时 panic，帮我修复"
+auv run "src/auth.rs 中的登录函数在空密码时 panic，帮我修复"
 
 # 单次 — 重构
-harness run --no-tui "把 src/ 下所有的 unwrap() 替换成 ? 操作符"
+auv run --no-tui "把 src/ 下所有的 unwrap() 替换成 ? 操作符"
 
 # 调低审批力度：高风险命令也自动批准（仅严重需审批）
-harness --approval none
-harness run --approval none "升级项目依赖"
+auv --approval none
+auv run --approval none "升级项目依赖"
 
 # 用 DeepSeek
-harness run -c deepseek.toml "解释一下这个项目的架构"
+auv run -c deepseek.toml "解释一下这个项目的架构"
 
 # 写 Dockerfile 然后构建
-harness run "写一个 Dockerfile 用于部署这个 Rust 项目"
+auv run "写一个 Dockerfile 用于部署这个 Rust 项目"
 ```
 
 ---
 
 ## 4. 配置文件
 
-`harness init` 会在当前目录创建 `config.toml`。所有字段都有默认值，不创建配置文件也能正常运行。
+`auv init` 会在当前目录创建 `./AuV/config.toml`（cwd 为 home 时创建 `~/AuV/config.toml`）。所有字段都有默认值，不创建配置文件也能正常运行（首次启动会自动创建两级配置）。
 
 ```toml
 [llm]
@@ -424,7 +438,7 @@ Agent 会在 relevant 时自动读取完整 skill 内容。REPL 中用 `/skills`
 - 静态规则 L1 的 Deny 始终硬拦截，不受力度影响；L1 Escalate 把评估等级抬到高，在「无」档下同样自动批准。
 - 审批只针对**工具调用**；`final_answer` 等无副作用动作永不审批。
 - 三种设置途径（命令行参数优先于配置文件，REPL 指令运行时切换）：
-  - 命令行：`harness --approval high`、`harness run --approval none "任务"`（REPL/TUI/CLI 所有模式可用，主值为英文 `none`/`low`/`medium`/`high`，中文「无/低/中/高」为兼容别名）
+  - 命令行：`auv --approval high`、`auv run --approval none "任务"`（REPL/TUI/CLI 所有模式可用，主值为英文 `none`/`low`/`medium`/`high`，中文「无/低/中/高」为兼容别名）
   - 配置文件：`[guardrails] approval_level = "medium"`（主值英文，中文档位名为兼容别名）
   - REPL：`/approval` 查看、`/approval <无|低|中|高>` 切换（中英文档位名均可，下轮任务生效）
 
@@ -452,7 +466,7 @@ harnessAgent/
 │   └── tui/                 # 终端 UI（ratatui）
 ├── docs/superpowers/        # 设计文档与计划
 ├── tests/mechanism_demo.rs  # 机制演示测试
-├── config.toml              # 配置文件（可选）
+├── AuV/config.toml         # 项目局部配置（可选）
 ├── rules.md                 # 规则文件（可选）
 ├── Cargo.toml
 └── Dockerfile

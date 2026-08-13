@@ -8,7 +8,7 @@ name = "harness_agent"
 path = "src/lib.rs"
 
 [[bin]]
-name = "harness"
+name = "auv"
 path = "src/main.rs"
 
 [dependencies]

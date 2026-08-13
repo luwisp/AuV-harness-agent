@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-08-13：项目更名 AuV + 两级配置系统 + AuV.md 角色说明
+
+### 1. 项目更名 AuV harness agent（简称 AuV）
+
+- 二进制 `harness` → **`auv`**；CLI 说明、REPL 横幅（`AuV harness agent REPL v0.1.0`）、默认系统提示词（"You are AuV harness agent, ..."）、`init` 输出全部品牌化
+- `auv init` 交互全程中文化（创建路径提示、覆盖询问、完成指引）
+- **保持不动**：lib/包名、内部类型名（`HarnessConfig` 等）、`.harness/` 数据目录、keyring 凭据服务名——已有会话与凭据无缝延续
+
+### 2. 两级配置系统（全局 + 项目）
+
+| 层级 | 路径 | 说明 |
+|------|------|------|
+| 全局 | `~/AuV/config.toml` | 用户级默认值（默认模型、默认审批力度等） |
+| 项目 | `./AuV/config.toml` | 项目级覆盖（cwd 为 home 目录时跳过） |
+
+- **启动自动创建**：配置不存在时创建目录并写入默认配置；**已存在则绝不改动**（幂等，E2E 二次启动验证无提示无改动）
+- **字段级合并**：`toml::Value` 递归合并，项目配置写哪个字段覆盖哪个，未写继承全局；`--config` 显式路径仍只读单文件
+- **旧版迁移**：项目根 `config.toml` 不再加载，启动时黄色提示「检测到旧版 …，请将配置移至 ./AuV/config.toml」
+- 配置损坏（TOML 解析失败）→ 中文错误退出；目录创建失败 → 中文警告继续默认
+- 提示信息在 REPL 清屏重绘**之后**打印（初版提示被启动清屏冲掉，E2E 中发现并修复）
+
+### 3. AuV.md 角色说明（两级 + 兼容已有）
+
+- 项目内按 `AuV.md` → `CLAUDE.md` → `AGENTS.md` 取第一个存在的文件；全局对应 `~/AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`——已有 CLAUDE.md/AGENTS.md 的项目无需改名
+- 合成规则：默认提示词 + 全局角色 + 项目角色（追加式叠加）；配置内联 `[agent] system_prompt` 最高优先；两级都不存在时零打扰、不创建文件
+- 加载时黄色提示「已加载全局/项目角色说明：<路径>」
+
+**测试：** 新增 12 个单元测试（路径解析、递归合并、分层创建幂等、字段级覆盖、cwd==home 跳过局部、旧版提示、损坏报错、角色文件优先级与兼容、persona 组装/内联优先/无文件不改）；既有品牌断言与 `load_config` 旧语义用例同步更新（CWD 锁测试改为 home/cwd 注入版，不再修改进程级 CWD）；全量 443 个测试通过（367 lib + 69 main + 3 demo + 4 doctest）。
+
+**E2E（tmux + 假 LLM + HOME 隔离）**：首次启动自动创建两级配置并提示；二次启动幂等；局部配置 `model` 与 `approval_timeout_secs = 3` 覆盖生效（状态行显示 deepseek-v4-flash、审批 3s 超时）；`AuV.md` 角色说明加载提示显示；审批流程端到端正常。
+
+**影响文件：** `Cargo.toml`（bin 改名）、`src/config/mod.rs`（分层加载 + 合并 + 角色文件检测）、`src/main.rs`（load_config 分层、apply_persona、notices、init 中文化、品牌文案）、`src/loop/context.rs`（默认提示词品牌化 + `pub`）、`src/lib.rs`（文档注释）、`README.md`（品牌 + 两级配置章节）、`docs/superpowers/specs/2026-08-13-auv-config-design.md`（新增设计文档）
+
+---
+
 ## 2026-08-13：修复审批响应失效（y 按不了）+ 审批竞态残留 + 行结束容错
 
 ### 症状（用户报告）

@@ -1,6 +1,6 @@
 # 交互式 REPL 模式 — 实现方案
 
-> **目标：** 将 harness 从一次性 `harness run "task"` 转为交互式 REPL，类似 Claude Code。无子命令时进入交互会话，用户可连续输入任务，agent 实时显示工具调用过程。
+> **目标：** 将 harness 从一次性 `auv run "task"` 转为交互式 REPL，类似 Claude Code（项目已更名 AuV）。无子命令时进入交互会话，用户可连续输入任务，agent 实时显示工具调用过程。
 
 **架构：** REPL 是在现有 `AgentLoop` 之上的薄交互层。Agent 主循环已通过 `AgentLoop::run_with_history()` 支持连续对话——主要改动是将其包装在 stdin/stdout 循环中，维护跨轮次对话历史，并内联渲染 agent 事件（工具调用、进度、护栏审批）。
 
@@ -50,9 +50,9 @@ Agent 主循环通过 `tokio::sync::mpsc` 通道发送 `AgentEvent` 给 REPL。R
 采用简洁专业的设计风格，全中文界面，不使用 emoji。角色标签为彩色背景块（用户蓝底白字、助手绿底黑字、工具紫底白字、系统灰底黑字）：
 
 ```
-HarnessAgent REPL v0.1.0
+AuV harness agent REPL v0.1.0
 输入任务开始对话，/help 查看命令，/exit 退出
-（暂无对话历史）                    ← 默认新会话；harness --resume 时打印恢复横幅
+（暂无对话历史）                    ← 默认新会话；auv --resume 时打印恢复横幅
 [1]  用户 › <task description>
   ────────────────────────────────
 [2]  助手 › ...
@@ -94,7 +94,7 @@ HarnessAgent REPL v0.1.0
 
 - 发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（≤12 字，`generate_conversation_title`：OpenAiProvider 单轮调用 + 标题 system prompt），保存到 `.harness/sessions/<标题>.json`；标题生成失败（网络/API 错误）回退 `autosave`，并给出黄色警告
 - 后续每轮对话自动按当前标题续存
-- 默认启动开启新会话；`harness --resume` 启动时恢复**最近修改**的会话（按文件 mtime 选择，跳过损坏文件）
+- 默认启动开启新会话；`auv --resume` 启动时恢复**最近修改**的会话（按文件 mtime 选择，跳过损坏文件）
 - REPL 内 `/resume` 命令仍可随时恢复任意会话
 - `/clear` 同时删除当前会话文件（含 `autosave` 兼容清理）
 - `/rename <标题>` 更改当前会话标题并重命名文件
@@ -144,7 +144,7 @@ HarnessAgent REPL v0.1.0
 - [x] 审批力度四档：配置 `[guardrails] approval_level` + CLI `--approval`（全局参数）+ REPL `/approval` 查看/切换；仅工具调用触发审批，L1 Deny 始终硬拦截
 - [x] 审批力度参数英文主值（none/low/medium/high），中文档位名为兼容别名（CLI、配置、序列化；REPL 中英文均可）
 - [x] `/skills` 指令：列出技能目录下已加载的技能（名称 + 描述），覆盖未配置/目录不存在/目录为空/正常列出
-- [x] 默认进入新会话（不自动恢复 autosave），`harness --resume` 启动参数恢复上次自动保存的会话
+- [x] 默认进入新会话（不自动恢复 autosave），`auv --resume` 启动参数恢复上次自动保存的会话
 - [x] 工具结果行直接显示具体命令（`工具 bash: <命令>`，事件 detail 字段 + 历史 tool_call_id 反查，实时/历史/view 一致；跳过 `Success: true` 包装行）
 - [x] `/model` 查看当前模型信息（模型、API 端点、上下文窗口、累计 Token）；`/model <名称>` 运行时切换（重建 agent，失败回滚）
 - [x] TUI 状态栏显示真实配置模型（不再硬编码）
@@ -156,3 +156,6 @@ HarnessAgent REPL v0.1.0
 - [x] 上下文窗口按模型家族识别（gpt-4/5/o 与 claude 128k、deepseek 64k、llama/qwen/glm 32k，未知回退 token_budget）
 - [x] 护栏审批改 REPL 事件模式：审批块独立行打印、y/n 经决定通道发回、审批结束全屏重绘清除（含本轮助手消息重印），回归测试禁止 DECSC/DECRC
 - [x] 审批期间 Ctrl+C 视为拒绝（`tokio::signal::ctrl_c()` 监听，不再杀死进程）；行结束 `\r` 容错；审批竞态残留经 `approval_pending` 补重绘
+- [x] 项目更名 AuV：二进制 `auv`、横幅/CLI/默认提示词品牌化；`.harness` 数据目录与内部类型名保持
+- [x] 两级配置：`~/AuV/config.toml`（全局）与 `./AuV/config.toml`（项目，cwd 为 home 时跳过），启动自动创建（存在不改）、字段级合并（局部覆盖全局）、旧版 config.toml 迁移提示
+- [x] AuV.md 角色说明：全局（`~/AuV/AuV.md`）与项目（`./AuV.md`）两级检测，兼容已有 CLAUDE.md/AGENTS.md，叠加到默认提示词，内联 `[agent] system_prompt` 最高优先

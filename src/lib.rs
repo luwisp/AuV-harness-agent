@@ -1,4 +1,4 @@
-//! HarnessAgent - Coding Agent Harness
+//! AuV harness agent — 带护栏、工具执行与反馈回路的 AI 编码代理
 
 pub mod config;
 pub mod credentials;

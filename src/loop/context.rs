@@ -128,9 +128,9 @@ impl ContextBuilder {
     }
 }
 
-/// The default system prompt used when none is configured.
-fn default_system_prompt() -> String {
-    r#"You are HarnessAgent, an AI coding assistant that helps users with software development tasks.
+/// 默认系统提示词（角色说明文件未配置时使用）。
+pub fn default_system_prompt() -> String {
+    r#"You are AuV harness agent, an AI coding assistant that helps users with software development tasks.
 
 You have access to a set of tools that you can use to read, write, and edit files,
 run shell commands, search the codebase, and execute tests.
@@ -258,7 +258,7 @@ mod tests {
     fn test_default_system_prompt_is_non_empty() {
         let prompt = super::default_system_prompt();
         assert!(!prompt.is_empty());
-        assert!(prompt.contains("HarnessAgent"));
+        assert!(prompt.contains("AuV harness agent"));
         assert!(prompt.contains("FINAL ANSWER"));
     }
 
@@ -291,6 +291,6 @@ mod tests {
         );
 
         let messages = builder.build(&[], "task");
-        assert!(messages[0].content.contains("HarnessAgent"));
+        assert!(messages[0].content.contains("AuV harness agent"));
     }
 }

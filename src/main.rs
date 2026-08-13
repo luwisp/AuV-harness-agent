@@ -43,11 +43,10 @@ use harness_agent::types::{Message, Role, ToolCall};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "harness",
+    name = "auv",
     version = "0.1.0",
-    about = "HarnessAgent - Coding Agent Harness",
-    long_about = "An AI-powered coding agent harness with guardrails, \
-                  tool execution, and feedback loops."
+    about = "AuV harness agent - AI 编码代理",
+    long_about = "带护栏、工具执行与反馈回路的 AI 编码代理（AuV harness agent）"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -80,7 +79,7 @@ enum Commands {
         no_tui: bool,
     },
 
-    /// Initialize harness configuration (config.toml, .memory directory, API key)
+    /// 初始化 AuV 配置（./AuV/config.toml、.memory 目录、API 密钥）
     Init,
 
     /// Manage API keys
@@ -126,12 +125,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => {
-            let mut config = load_config(None)?;
+            let (mut config, mut notices) = load_config(None)?;
             if let Some(level) = cli.approval {
                 config.guardrails.approval_level = level;
             }
+            let (home, cwd) = current_home_cwd();
+            notices.extend(apply_persona(&mut config, &home, &cwd));
             let workspace = std::env::current_dir()?;
-            run_repl(config, workspace, cli.resume).await
+            run_repl(config, workspace, cli.resume, notices).await
         }
 
         Some(Commands::Run {
@@ -139,10 +140,13 @@ async fn main() -> Result<()> {
             config,
             no_tui,
         }) => {
-            let mut config = load_config(config)?;
+            let (mut config, mut notices) = load_config(config)?;
             if let Some(level) = cli.approval {
                 config.guardrails.approval_level = level;
             }
+            let (home, cwd) = current_home_cwd();
+            notices.extend(apply_persona(&mut config, &home, &cwd));
+            print_notices(&notices);
             let workspace = std::env::current_dir()?;
 
             // Resolve API key from config or env
@@ -379,7 +383,12 @@ async fn handle_approval_event_with(
 /// 每次对话结束后自动保存会话（autosave），可通过 `--resume`
 /// 参数在下次启动时恢复；默认开启新会话。
 /// 输入使用 rustyline，支持上下键历史导航与左右键行内编辑。
-async fn run_repl(mut config: HarnessConfig, workspace: PathBuf, resume: bool) -> Result<()> {
+async fn run_repl(
+    mut config: HarnessConfig,
+    workspace: PathBuf,
+    resume: bool,
+    notices: Vec<String>,
+) -> Result<()> {
     let api_key = resolve_api_key(&config)?;
 
     // 创建事件通道，用于实时显示本轮消息（assistant 块、工具结果）。
@@ -434,6 +443,9 @@ async fn run_repl(mut config: HarnessConfig, workspace: PathBuf, resume: bool) -
         _ => String::new(),
     };
     redraw_interface(&conversation, &status);
+
+    // 配置/角色说明加载提示（清屏重绘之后打印，避免被清屏冲掉）
+    print_notices(&notices);
 
     loop {
         // 输入区域：分隔线 + 状态行 + 提示符，状态行显示在输入行上方。
@@ -1155,7 +1167,7 @@ fn view_message(conversation: &[Message], index: usize) -> std::result::Result<S
 
 /// 打印启动横幅。
 fn print_banner() {
-    println!("\x1b[36;1mHarnessAgent\x1b[0m REPL v0.1.0");
+    println!("\x1b[36;1mAuV harness agent\x1b[0m REPL v0.1.0");
     println!("输入任务开始对话，/help 查看命令，/exit 退出");
 }
 
@@ -1502,23 +1514,82 @@ fn build_repl_prompt(status_line: &str) -> String {
 }
 
 // ============================================================================
-// load_config
+// load_config（AuV 两级分层）
 // ============================================================================
 
-/// Load a `HarnessConfig` from the given path, or from the default
-/// `config.toml` if no path is provided.  If `config.toml` does not exist,
-/// returns the default configuration.
-fn load_config(path: Option<PathBuf>) -> Result<HarnessConfig> {
+/// 加载配置：`--config` 显式指定时只读该文件；否则按「全局 → 局部」分层加载
+/// （`~/AuV/config.toml` → `./AuV/config.toml`，局部字段级覆盖全局）。
+/// 返回 (配置, 用户提示)。
+fn load_config(path: Option<PathBuf>) -> Result<(HarnessConfig, Vec<String>)> {
     match path {
-        Some(p) => HarnessConfig::from_file(&p),
+        Some(p) => Ok((HarnessConfig::from_file(&p)?, Vec::new())),
         None => {
-            let default_path = PathBuf::from("config.toml");
-            if default_path.exists() {
-                HarnessConfig::from_file(&default_path)
-            } else {
-                Ok(HarnessConfig::default())
+            let (home, cwd) = current_home_cwd();
+            load_config_layered(&home, &cwd)
+        }
+    }
+}
+
+/// 分层加载（home/cwd 参数注入，便于测试隔离）。
+fn load_config_layered(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<(HarnessConfig, Vec<String>)> {
+    let layered = harness_agent::config::load_layered(home, cwd)?;
+    Ok((layered.config, layered.notices))
+}
+
+/// 当前用户主目录与工作目录（主目录不可得时回退当前目录）。
+fn current_home_cwd() -> (PathBuf, PathBuf) {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    (home, cwd)
+}
+
+/// 组装角色说明：默认提示词 + 全局角色文件 + 项目角色文件（追加式叠加）。
+/// 配置已内联 `[agent] system_prompt` 时直接使用（最高优先，不加载文件）。
+/// 返回用户可见提示（加载了哪个文件 / 读取失败警告）。
+fn apply_persona(
+    config: &mut HarnessConfig,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    if config.agent.system_prompt.is_some() {
+        return Vec::new();
+    }
+    let (global, project) = harness_agent::config::resolve_persona_files(home, cwd);
+    if global.is_none() && project.is_none() {
+        return Vec::new();
+    }
+    let mut notices = Vec::new();
+    let mut persona = String::new();
+    for (path, label) in [(global, "全局"), (project, "项目")] {
+        if let Some(p) = path {
+            match std::fs::read_to_string(&p) {
+                Ok(text) => {
+                    persona.push_str(&text);
+                    persona.push_str("\n\n");
+                    notices.push(format!("已加载{}角色说明：{}", label, p.display()));
+                }
+                Err(e) => notices.push(format!(
+                    "读取角色说明 {} 失败：{}（已忽略）",
+                    p.display(),
+                    e
+                )),
             }
         }
+    }
+    let mut full = harness_agent::r#loop::context::default_system_prompt();
+    full.push_str("\n\n## Persona\n");
+    full.push_str(&persona);
+    config.agent.system_prompt = Some(full);
+    notices
+}
+
+/// 打印配置/角色加载提示（黄色）。
+fn print_notices(notices: &[String]) {
+    for n in notices {
+        println!("\x1b[93m提示：{}\x1b[0m", n);
     }
 }
 
@@ -1538,7 +1609,7 @@ fn resolve_api_key(config: &HarnessConfig) -> Result<String> {
     Err(harness_agent::error::HarnessError::Auth(
         "No API key found. Set it in config.toml under [llm].api_key, \
          or set the OPENAI_API_KEY environment variable. \
-         Run `harness key set` to store it in the env file."
+         Run `auv key set` to store it in the env file."
             .to_string(),
     ))
 }
@@ -1732,40 +1803,47 @@ fn build_agent(
 async fn run_init() -> Result<()> {
     use std::io::{self, Write};
 
-    println!("HarnessAgent Initialization");
-    println!("===========================");
+    println!("AuV 初始化");
+    println!("==========");
 
-    // 1. Create config.toml if it doesn't exist
-    let config_path = PathBuf::from("config.toml");
+    // 1. 创建项目局部配置 ./AuV/config.toml（cwd 为 home 目录时创建全局配置）
+    let (home, cwd) = current_home_cwd();
+    let config_path = if cwd == home {
+        home.join("AuV").join("config.toml")
+    } else {
+        cwd.join("AuV").join("config.toml")
+    };
     if config_path.exists() {
         let mut answer = String::new();
-        print!("config.toml already exists. Overwrite? [y/N]: ");
+        print!("{} 已存在，是否覆盖？[y/N]: ", config_path.display());
         io::stdout().flush()?;
         io::stdin().read_line(&mut answer)?;
         let answer = answer.trim().to_lowercase();
         if answer != "y" && answer != "yes" {
-            println!("Skipping config.toml creation.");
+            println!("跳过配置创建（保留现有配置）。");
         } else {
-            write_default_config(&config_path)?;
+            harness_agent::config::write_default_config(&config_path)?;
+            println!("已写入默认配置：{}", config_path.display());
         }
     } else {
-        write_default_config(&config_path)?;
+        harness_agent::config::write_default_config(&config_path)?;
+        println!("已创建配置：{}", config_path.display());
     }
 
-    // 2. Create .memory directory
+    // 2. 创建 .memory 目录
     let memory_path = PathBuf::from(".memory");
     if !memory_path.exists() {
         std::fs::create_dir_all(&memory_path)?;
         let index_path = memory_path.join("MEMORY.md");
         std::fs::write(&index_path, "# Memory Index\n\n")?;
-        println!("Created .memory/ directory.");
+        println!("已创建 .memory/ 目录。");
     } else {
-        println!(".memory/ directory already exists.");
+        println!(".memory/ 目录已存在。");
     }
 
-    // 3. Optionally set up API key
+    // 3. 可选：设置 API 密钥
     let mut answer = String::new();
-    print!("Would you like to set up your OpenAI API key now? [y/N]: ");
+    print!("现在设置 API 密钥吗？[y/N]: ");
     io::stdout().flush()?;
     io::stdin().read_line(&mut answer)?;
     let answer = answer.trim().to_lowercase();
@@ -1773,21 +1851,10 @@ async fn run_init() -> Result<()> {
         run_key_set().await?;
     }
 
-    println!("\nInitialization complete.");
-    println!("Edit config.toml to customize settings.");
-    println!("Run `harness run \"your task\"` for a single task, or just `harness` for interactive REPL mode.");
+    println!("\n初始化完成。");
+    println!("编辑 {} 自定义配置（默认模型、审批力度等）。", config_path.display());
+    println!("运行 `auv run \"任务\"` 执行单次任务，或直接 `auv` 进入交互式 REPL。");
 
-    Ok(())
-}
-
-/// Write a default `config.toml` file to the given path.
-fn write_default_config(path: &PathBuf) -> Result<()> {
-    let config = HarnessConfig::default();
-    let toml_str = toml::to_string_pretty(&config).map_err(|e| {
-        harness_agent::error::HarnessError::Config(format!("Failed to serialize config: {}", e))
-    })?;
-    std::fs::write(path, toml_str)?;
-    println!("Created config.toml with default settings.");
     Ok(())
 }
 
@@ -1828,11 +1895,6 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    /// 串行化会修改进程级当前工作目录（CWD）的测试：
-    /// Rust 测试默认并行执行，两个 set_current_dir 测试会互相竞争
-    /// 全局 CWD，导致偶发失败。加锁保证它们互斥。
-    static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     // -----------------------------------------------------------------------
     // Helper: parse CLI args from a string
     // -----------------------------------------------------------------------
@@ -1842,7 +1904,7 @@ mod tests {
     /// as a single argument.
     fn parse(args: &str) -> Cli {
         let args_vec = shell_split(args);
-        let mut full_args: Vec<&str> = vec!["harness"];
+        let mut full_args: Vec<&str> = vec!["auv"];
         full_args.extend(args_vec.iter().map(|s| s.as_str()));
         Cli::parse_from(full_args)
     }
@@ -2034,7 +2096,7 @@ mod tests {
 
     #[test]
     fn test_version_flag() {
-        let args: Vec<&str> = vec!["harness", "--version"];
+        let args: Vec<&str> = vec!["auv", "--version"];
         let result = Cli::try_parse_from(args);
         // --version causes clap to print and exit with ErrorKind::DisplayVersion
         assert!(result.is_err() || result.is_ok());
@@ -2042,7 +2104,7 @@ mod tests {
 
     #[test]
     fn test_help_flag() {
-        let args: Vec<&str> = vec!["harness", "--help"];
+        let args: Vec<&str> = vec!["auv", "--help"];
         let result = Cli::try_parse_from(args);
         // --help causes clap to print and exit, so this is expected to be an error
         // (ErrorKind::DisplayHelp). We just verify it doesn't panic.
@@ -2056,7 +2118,7 @@ mod tests {
     #[test]
     fn test_run_with_empty_task_rejected() {
         // Empty string as task — clap should reject this as a missing required argument
-        let args: Vec<&str> = vec!["harness", "run", ""];
+        let args: Vec<&str> = vec!["auv", "run", ""];
         let result = Cli::try_parse_from(args);
         // clap may accept "" as a task or reject it; either behavior is fine
         // We just verify it doesn't panic
@@ -2076,34 +2138,34 @@ mod tests {
 
     #[test]
     fn test_no_subcommand_enters_repl() {
-        let args: Vec<&str> = vec!["harness"];
+        let args: Vec<&str> = vec!["auv"];
         let cli = Cli::parse_from(args);
         assert!(cli.command.is_none(), "No subcommand should enter REPL mode");
     }
 
     #[test]
     fn test_resume_flag_default_false() {
-        let cli = Cli::parse_from(vec!["harness"]);
+        let cli = Cli::parse_from(vec!["auv"]);
         assert!(!cli.resume, "--resume 默认应为关闭（新会话）");
     }
 
     #[test]
     fn test_resume_flag_enables_session_restore() {
-        let cli = Cli::parse_from(vec!["harness", "--resume"]);
+        let cli = Cli::parse_from(vec!["auv", "--resume"]);
         assert!(cli.resume, "--resume 应开启上次会话恢复");
         assert!(cli.command.is_none());
     }
 
     #[test]
     fn test_invalid_subcommand() {
-        let args: Vec<&str> = vec!["harness", "unknown"];
+        let args: Vec<&str> = vec!["auv", "unknown"];
         let result = Cli::try_parse_from(args);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_approval_flag_parses_in_repl_mode() {
-        let cli = Cli::parse_from(vec!["harness", "--approval", "high"]);
+        let cli = Cli::parse_from(vec!["auv", "--approval", "high"]);
         assert_eq!(cli.approval, Some(ApprovalLevel::High));
         assert!(cli.command.is_none());
     }
@@ -2111,7 +2173,7 @@ mod tests {
     #[test]
     fn test_approval_flag_parses_in_run_mode() {
         // global = true：参数在子命令后同样可用
-        let cli = Cli::parse_from(vec!["harness", "run", "--approval", "none", "测试任务"]);
+        let cli = Cli::parse_from(vec!["auv", "run", "--approval", "none", "测试任务"]);
         assert_eq!(cli.approval, Some(ApprovalLevel::None));
         match cli.command {
             Some(Commands::Run { task, .. }) => assert_eq!(task, "测试任务"),
@@ -2122,13 +2184,13 @@ mod tests {
     #[test]
     fn test_approval_flag_accepts_chinese_alias() {
         // 中文档位名为兼容别名（CLI 主值为英文）
-        let cli = Cli::parse_from(vec!["harness", "--approval", "高"]);
+        let cli = Cli::parse_from(vec!["auv", "--approval", "高"]);
         assert_eq!(cli.approval, Some(ApprovalLevel::High));
     }
 
     #[test]
     fn test_approval_flag_rejects_invalid_value() {
-        let result = Cli::try_parse_from(vec!["harness", "--approval", "无敌"]);
+        let result = Cli::try_parse_from(vec!["auv", "--approval", "无敌"]);
         assert!(result.is_err());
     }
 
@@ -2193,10 +2255,11 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         std::fs::write(&config_path, toml_str).unwrap();
 
-        let loaded = load_config(Some(config_path)).unwrap();
+        let (loaded, notices) = load_config(Some(config_path)).unwrap();
         assert_eq!(loaded.llm.model, "gpt-4o");
         assert_eq!(loaded.agent.max_turns, 50);
         assert!(loaded.validate().is_ok());
+        assert!(notices.is_empty(), "显式路径不应产生提示");
     }
 
     #[test]
@@ -2206,40 +2269,79 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_default_when_no_file() {
-        // 修改进程级 CWD，与其他 CWD 测试互斥（见 CWD_TEST_LOCK）
-        let _guard = CWD_TEST_LOCK.lock().unwrap();
-        // Switch to a temp dir where config.toml doesn't exist
-        let dir = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let loaded = load_config(None).unwrap();
+    fn test_load_config_layered_default_when_no_file() {
+        // home/cwd 注入，无需修改进程级 CWD
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let (loaded, notices) = load_config_layered(home.path(), cwd.path()).unwrap();
         assert_eq!(loaded.llm.model, "gpt-4o"); // default
-
-        std::env::set_current_dir(original_dir).unwrap();
+        assert!(home.path().join("AuV/config.toml").exists());
+        assert!(cwd.path().join("AuV/config.toml").exists());
+        assert_eq!(notices.len(), 2);
     }
 
     #[test]
-    fn test_load_config_from_default_file() {
-        // 修改进程级 CWD，与其他 CWD 测试互斥（见 CWD_TEST_LOCK）
-        let _guard = CWD_TEST_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+    fn test_load_config_layered_from_local_file() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let local_dir = cwd.path().join("AuV");
+        std::fs::create_dir_all(&local_dir).unwrap();
         let mut config = HarnessConfig::default();
         config.llm.model = "gpt-4o-mini".to_string();
         config.agent.max_turns = 10;
         let toml_str = toml::to_string_pretty(&config).unwrap();
-        std::fs::write(&config_path, toml_str).unwrap();
+        std::fs::write(local_dir.join("config.toml"), toml_str).unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let loaded = load_config(None).unwrap();
+        let (loaded, _) = load_config_layered(home.path(), cwd.path()).unwrap();
         assert_eq!(loaded.llm.model, "gpt-4o-mini");
         assert_eq!(loaded.agent.max_turns, 10);
+    }
 
-        std::env::set_current_dir(original_dir).unwrap();
+    // -----------------------------------------------------------------------
+    // apply_persona tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_persona_loads_global_and_project() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("CLAUDE.md"), "全局人设").unwrap();
+        std::fs::write(cwd.path().join("AuV.md"), "项目人设").unwrap();
+
+        let mut config = HarnessConfig::default();
+        let notices = apply_persona(&mut config, home.path(), cwd.path());
+        let prompt = config.agent.system_prompt.as_ref().expect("应组装角色说明");
+        assert!(prompt.contains("全局人设"), "全局角色文件应叠加");
+        assert!(prompt.contains("项目人设"), "项目角色文件应叠加");
+        assert!(prompt.contains("## Persona"));
+        assert_eq!(notices.len(), 2, "两级各一条加载提示：{:?}", notices);
+    }
+
+    #[test]
+    fn test_apply_persona_inline_system_prompt_wins() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("AuV.md"), "文件人设").unwrap();
+
+        let mut config = HarnessConfig::default();
+        config.agent.system_prompt = Some("内联人设".to_string());
+        let notices = apply_persona(&mut config, home.path(), cwd.path());
+        assert_eq!(
+            config.agent.system_prompt.as_deref(),
+            Some("内联人设"),
+            "内联配置最高优先，不加载文件"
+        );
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn test_apply_persona_none_when_no_files() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = HarnessConfig::default();
+        let notices = apply_persona(&mut config, home.path(), cwd.path());
+        assert!(config.agent.system_prompt.is_none(), "无角色文件时不改动配置");
+        assert!(notices.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -2339,7 +2441,7 @@ mod tests {
     fn test_write_default_config() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        write_default_config(&config_path).unwrap();
+        harness_agent::config::write_default_config(&config_path).unwrap();
         assert!(config_path.exists());
 
         let content = std::fs::read_to_string(&config_path).unwrap();
