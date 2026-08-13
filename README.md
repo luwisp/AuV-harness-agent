@@ -499,16 +499,16 @@ harnessAgent/
 │   ├── llm/                 # LLM 抽象层（trait + openai + mock）
 │   ├── config/              # 配置（HarnessConfig + rules + skills）
 │   ├── loop/                # Agent 主循环（AgentLoop + parser + context）
-│   ├── tools/               # 工具系统（8 个内置工具）
+│   ├── tools/               # 工具系统（9 个内置工具，含 subagent 委派）
 │   ├── guardrails/          # 护栏系统（四层管线）
 │   ├── feedback/            # 反馈闭环（test/lint/typeck）
 │   ├── memory/              # 记忆系统（文件级）
 │   ├── credentials/         # 凭据管理（keyring + enc file）
 │   ├── observability/       # 可观测性（trace log）
-│   ├── subagent/            # 子 Agent 派发
+│   ├── subagent/            # 子 Agent 派发（深度传播 + AgentLoopRunner + 审批路由）
 │   └── tui/                 # 终端 UI（ratatui）
 ├── docs/superpowers/        # 设计文档与计划
-├── tests/mechanism_demo.rs  # 机制演示测试
+├── tests/mechanism_demo.rs  # 机制演示测试（4 项）
 ├── .AuV/config.toml         # 项目局部配置（可选）
 ├── rules.md                 # 规则文件（可选）
 ├── Cargo.toml

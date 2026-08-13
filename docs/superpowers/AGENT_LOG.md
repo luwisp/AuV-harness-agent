@@ -15,8 +15,9 @@
 | 2026-08-12 | REPL 对话修复与输入体验 | `fdaec41`、`213f44b`、`19cfc36` |
 | 2026-08-13 | REPL/审批/护栏/配置密集迭代（11 轮） | `dc6052a`、`efa9f4d`、`04684ff`、`a30bba0`、`29e5270` |
 | 2026-08-14 | 护栏管线修复 + 数据目录统一收纳 | `8c102ec`、`21f50d5`、`227e1d5` |
+| 2026-08-14 | subagent 孤岛模块生产接入（10 步计划） | `980b593`、`16db698`、`a2937e8`、`b21f8b5`、`300710b`、`dc3f0da`、`e68e2b2`、`143745d`、`d9e4283` |
 
-测试数量演变：362 → 363 → 368 → 375 → 378 → 384 → 396 → 420 → 425 → 427 → 443。
+测试数量演变：362 → 363 → 368 → 375 → 378 → 384 → 396 → 420 → 425 → 427 → 443 → 469 → 478。
 
 ---
 
@@ -316,10 +317,37 @@
 
 ---
 
+## 2026-08-14（续）：subagent 孤岛模块生产接入
+
+### 条目 28｜2026-08-14 subagent 孤岛模块生产接入（10 步计划）
+
+**背景**：用户通过真实运行 `auv` 发现 `src/subagent/mod.rs` 是孤岛死代码——`SubagentSpawner`/`AgentRunner` 编译通过、自测全绿，但生产零引用（工具注册表无 subagent 工具；递归调用 agent_loop 的生产 Runner 从未实现），而 PLAN 任务 24 标「已完成」、SPEC §3.8 声称支持子 Agent——文档与现实脱节。用户要求接入（「目前subagent没有用啊」）。
+
+**用户确认的决策**：子 agent 审批路由到父界面（REPL 状态区提示 + 查看子上下文）；隔离模式仅实现 SameProcess（Worktree 预留）；新增第四项机制演示；新增 `[subagent]` 配置段。
+
+**实施**（每步独立编译 + 测试 + 提交，共 9 个提交）：
+1. `[subagent]` 配置段（max_depth=3 / max_total_agents=10，serde default）— `980b593`
+2. Spawner 深度传播重构：`depth` 字段 + `for_child()`（深度 +1、共享 `Arc<AtomicUsize>` 活跃计数）、`AgentRunner::run` 签名改收 `Arc<SubagentSpawner>`（工厂闭包需拥有子层 spawner）— `16db698`
+3. `SubagentTool` 委派工具：同步 execute 内用 BashTool 先例（子线程 + current_thread runtime + `recv_timeout` 超时），结果含耗时/深度结构化字段 — `a2937e8`
+4. `AgentLoopRunner` 生产 Runner：工厂闭包为每次委派构建独立子 loop；工厂错误降级为失败的 SubagentResult — `b21f8b5`
+5. main.rs 生产装配：`SubagentWiring` + `build_subagent_wiring`（捕获 config/API key/工作区/审批模式）；build_agent 第 6 参注册 SubagentTool；REPL/CLI 启用（InBandStdin 审批）；修复并行 env var 测试竞态（静态 Mutex 串行化）— `300710b`、`5a49d0a`、`82450f4`
+6. 审批上下文预览：`ApprovalGate` 加 preview 字段，agent loop 每次护栏检查前注入最近 5 条消息（每条 60 字符截断），stdin 审批块尾部追加「上下文（最近消息）」段 — `e68e2b2`
+7. TUI 子审批路由：`AgentEvent::SubagentApprovalNeeded { request, label, decision_tx }`（子专属回发通道，与父审批全局通道分离）；`AppState.guard_requests` 改 `Vec<GuardRequest>`；护栏面板标注「来源: 子 agent」；TUI 装配启用子 agent — `143745d`
+8. 第四项机制演示：父 mock LLM 委派「计算 2+2」→ 工厂构建子 loop（子 mock FinalAnswer「结果为 4」）→ 父汇总；验证子 loop 注册递归 subagent 工具 — `d9e4283`
+9. 文档同步：SPEC §3.3/§3.7/§3.8/§5.4、PLAN 任务 24 生产接入记录、本日志
+
+**设计决策**：
+- 父子审批不可能并发（父在工具执行期间同步阻塞），因此 REPL/CLI 子审批走 in-band stdin 路径（子线程内打印 + 读 y/n），TUI 走事件路由；子 loop 不设事件通道（转发只会堆积错序）
+- 已知限制（如实文档化）：REPL 冻结期间无实时子 agent 状态行（前置：Tool::execute 异步化）；`recv_timeout` 超时后子线程无法强制终止（孤儿线程跑完、结果丢弃，受 max_total_agents 约束）；Worktree 调用返回明确错误
+
+**验证**：全量 478 项测试通过（469 → 478）；机制演示 4/4；剩余 2 条既有 `unused_mut` 警告（步骤 10 清除）。
+
+---
+
 ## 统计汇总
 
-- 提交总数：56（2026-07-08 至 2026-08-14，含本次 type-check 假阳性修复提交）
-- 测试数量：362 → 449（+87）；当前测试构建有 2 条既有 `unused_mut` 警告，Clippy 有约 300 条风格建议
+- 提交总数：65（2026-07-08 至 2026-08-14，含 subagent 生产接入 9 个提交）
+- 测试数量：362 → 478（+116）；当前测试构建有 2 条既有 `unused_mut` 警告（随步骤 10 清除），Clippy 有约 300 条风格建议
 - 用户报告 bug 数：5（审批提示同行/残留、审批超时三连、y 按不了、吞掉最终消息、滚动重复历史）——全部经根因定位修复并加回归测试
 - 关键方法论：mock 确定性测试（全部机制离线可测）+ pty 集成测试 + tmux E2E（HOME 隔离 + 假 LLM 服务器 127.0.0.1:18999）+ 真实会话审计日志定位
 

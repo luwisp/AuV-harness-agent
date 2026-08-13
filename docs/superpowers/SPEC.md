@@ -68,6 +68,7 @@
 | `glob` | 文件名模式匹配 | 只读 |
 | `git_diff` | 查看工作区变更 | 只读 |
 | `run_test` | 执行测试命令 | 超时 + 输出截断 |
+| `subagent` | 委派任务给子 agent，返回摘要 | 深度/总数上限 + 超时 + 子审批路由 |
 
 > 说明：LSP 诊断在实现中降级为解析 `cargo check` 输出（见 §11 风险 2），未作为独立工具提供。
 
@@ -121,13 +122,18 @@ Action → [静态规则] → [风险评估] → [沙箱校验] → [审批状�
   - 启动自动创建（已存在则绝不改动，幂等）；`toml::Value` 字段级递归合并（项目覆盖全局）
   - `--config <path>` 显式指定时只读单文件；项目根旧版 `config.toml` 不再加载，仅打印迁移提示
 - **角色说明文件**（`AuV.md`）：两级检测——项目 `./AuV.md` → `./CLAUDE.md` → `./AGENTS.md`，全局 `~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`，取第一个存在的文件；追加式叠加（默认提示词 + 全局 + 项目），配置内联 `[agent] system_prompt` 最高优先
+- **`[subagent]` 配置段**：`max_depth = 3`（递归深度上限，根为 0）、`max_total_agents = 10`（同时活跃子 agent 数上限）；缺省时取默认值
 
 ### 3.8 子 Agent 系统
 
-- 递归调用 `agent_loop`，子 agent 在独立上下文中运行
-- 子 agent 只返回摘要给主循环
-- 支持 SameProcess 和 Worktree 两种隔离模式
-- 防护：递归深度上限（默认 3）、总 agent 数上限（默认 10）
+- 父 agent 通过 `subagent` 工具把任务委派给子 agent；子 agent 递归调用 `agent_loop`，在独立对话上下文与独立工具集中运行，只返回摘要给主循环
+- **已接入生产**：SameProcess 隔离（子 loop 在子线程运行）；Worktree 隔离为预留项，调用返回明确错误「尚未实现」
+- 深度传播：`SubagentSpawner` 携带 `depth`（根为 0），`for_child()` 深度 +1 并共享全链 active 计数；`AgentLoopRunner` 工厂闭包为每次委派构建独立子 loop（main.rs 装配，捕获配置/API key/工作区/审批模式）
+- 防护：递归深度上限（`[subagent] max_depth` 默认 3）、总活跃 agent 数上限（`max_total_agents` 默认 10），超限分别返回 `RecursionDepthExceeded` / `SubagentLimitReached`
+- **审批路由到父界面**：
+  - REPL / CLI：子审批走 in-band 路径——子 loop 审批门在子线程内打印审批块（标题标注「子 agent」+ 最近对话上下文预览）并读取 y/n
+  - TUI：stdin 被 crossterm raw mode 接管，子审批请求以 `SubagentApprovalNeeded` 事件（携带来源标签与子专属回发通道）路由到父界面护栏面板，y/n 决定经事件自带通道回发，与父审批的全局决策通道分离
+- 已知限制：父 agent 工具执行期间同步阻塞，REPL 无法实时刷新子 agent 状态行（仅完成摘要）；超时后子线程无法强制终止，子 agent 后台跑完、结果丢弃（受 max_total_agents 约束）
 
 ### 3.9 可观测性
 
@@ -266,11 +272,11 @@ flowchart TB
 
             Guardrail["Guardrail Pipeline<br/>(rules/<br/>approval/<br/>sandbox/<br/>audit)"]
 
-            Tools["Tool Registry<br/>(files/bash/<br/>grep/lsp/<br/>git/test)"]
+            Tools["Tool Registry<br/>(files/bash/<br/>grep/lsp/<br/>git/test/subagent)"]
 
             FeedbackRunner["Feedback Runner<br/>(test/lint/<br/>typeck)"]
 
-            Subagent["Subagent Spawner<br/>(isolate)"]
+            Subagent["Subagent Spawner<br/>(SameProcess)"]
 
             Credentials["Credentials<br/>(keyring/<br/>encrypted)"]
         end
@@ -352,11 +358,12 @@ harnessAgent/
       search.rs               # grep / glob
       git.rs                  # git_diff
       test_runner.rs          # run_test
+      subagent.rs             # SubagentTool（任务委派：子线程 + 超时 + 结果摘要）
     guardrails/
       mod.rs                  # GuardrailPipeline（L1→L2→L3 沙箱→L4 审批 + ApprovalLevel 四档）
       rules.rs                # L1 静态规则引擎（内置危险规则，中文化）
       assessor.rs             # L2 风险评估（命令/文件/网络，原因与缓解措施中文化）
-      approval.rs             # L4 人工审批门（UI 事件模式 + 可取消轮询读取 + Ctrl+C 拒绝）
+      approval.rs             # L4 人工审批门（UI 事件模式 + 子审批路由 + 可取消轮询读取 + Ctrl+C 拒绝）
       sandbox.rs              # L3 沙箱边界（先于审批的硬校验）
       audit.rs                # 审计日志（每条动作恰好一条记录）
       config.rs               # 护栏配置文件解析
@@ -369,7 +376,8 @@ harnessAgent/
       mod.rs                  # MemoryStore（文件级 CRUD + 索引注入）
       entry.rs                # MemoryEntry 数据结构
     subagent/
-      mod.rs                  # SubagentSpawner（深度/总数上限）
+      mod.rs                  # SubagentSpawner（深度传播/总数上限）+ AgentLoopRunner
+                              # （工厂闭包构建子 loop）+ SubagentApproval 审批路由
     observability/
       mod.rs                  # TraceLog
     credentials/

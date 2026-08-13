@@ -623,6 +623,8 @@ pub struct AgentLoop {
 
 **完成状态**：✓ 已完成 — commit `7db8c06`（feat: add subagent spawner with depth and count limits）
 
+**生产接入（2026-08 补充）**：早期实现仅自测通过、生产零引用（孤岛模块）。现已在 10 步计划中接入生产：`[subagent]` 配置段（max_depth/max_total_agents）→ spawner 深度传播（`for_child` 链）→ `SubagentTool` 委派工具 → `AgentLoopRunner` 生产 Runner（工厂闭包构建子 loop）→ main.rs 装配（REPL/CLI/TUI 全部启用）→ 审批上下文预览 → TUI 子审批路由（`SubagentApprovalNeeded` 事件 + 子专属回发通道）→ 第四项机制演示（父委派子 agent 汇总结果）。SameProcess 已实现；Worktree 保持预留（调用返回明确错误）。已知限制：REPL 冻结期无实时子状态行；超时孤儿线程结果丢弃。commits：`980b593`→`16db698`→`a2937e8`→`b21f8b5`→`300710b`→`dc3f0da`→`e68e2b2`→`143745d`→`d9e4283`。
+
 ---
 
 ### 阶段 10：凭据管理（任务 25）
