@@ -56,8 +56,9 @@ fn handle_key(key: &KeyEvent, state: &AppState) -> KeyAction {
 /// Apply a key action to the application state, returning whether the TUI
 /// should exit.
 ///
-/// `decision_tx` 把护栏审批决定传回 `ApprovalGate`（事件模式），使
-/// y/n 按键真正驱动审批流程；测试传 `None` 时仅更新界面状态。
+/// `decision_tx` 把父审批决定传回 `ApprovalGate`（事件模式），使
+/// y/n 按键真正驱动审批流程；子审批请求自带 reply_tx，决定优先经
+/// 该通道直接回发给子 loop 的审批门。测试传 `None` 时仅更新界面状态。
 fn apply_key_action(
     action: KeyAction,
     state: &mut AppState,
@@ -71,13 +72,18 @@ fn apply_key_action(
         KeyAction::ApproveGuardrail => {
             // Remove the first pending guardrail request and notify the gate
             if let Some(req) = state.guard_requests.first() {
-                let id = req.id.clone();
+                let id = req.request.id.clone();
+                // 子审批：决定发回请求自带的 reply_tx；父审批：走全局决策通道
+                let reply_tx = req.reply_tx.clone();
                 state.remove_guard_request(&id);
-                if let Some(tx) = decision_tx {
-                    let _ = tx.try_send(ApprovalDecision::Approved {
-                        by: "user".to_string(),
-                        reason: Some("用户批准了该操作".to_string()),
-                    });
+                let decision = ApprovalDecision::Approved {
+                    by: "user".to_string(),
+                    reason: Some("用户批准了该操作".to_string()),
+                };
+                if let Some(tx) = reply_tx {
+                    let _ = tx.try_send(decision);
+                } else if let Some(tx) = decision_tx {
+                    let _ = tx.try_send(decision);
                 }
             }
             false
@@ -85,12 +91,17 @@ fn apply_key_action(
         KeyAction::DenyGuardrail => {
             // Remove the first pending guardrail request and notify the gate
             if let Some(req) = state.guard_requests.first() {
-                let id = req.id.clone();
+                let id = req.request.id.clone();
+                // 子审批：决定发回请求自带的 reply_tx；父审批：走全局决策通道
+                let reply_tx = req.reply_tx.clone();
                 state.remove_guard_request(&id);
-                if let Some(tx) = decision_tx {
-                    let _ = tx.try_send(ApprovalDecision::Denied {
-                        reason: "用户拒绝了该操作".to_string(),
-                    });
+                let decision = ApprovalDecision::Denied {
+                    reason: "用户拒绝了该操作".to_string(),
+                };
+                if let Some(tx) = reply_tx {
+                    let _ = tx.try_send(decision);
+                } else if let Some(tx) = decision_tx {
+                    let _ = tx.try_send(decision);
                 }
             }
             false
@@ -254,6 +265,15 @@ fn apply_agent_event(event: AgentEvent, state: &mut AppState) {
         }
         AgentEvent::GuardrailApprovalNeeded { request } => {
             state.add_guard_request(request);
+        }
+        AgentEvent::SubagentApprovalNeeded {
+            request,
+            label,
+            decision_tx,
+        } => {
+            // 子审批：请求入列并携带回发通道与来源标签，
+            // y/n 决定经该通道直接回发给子 loop 的审批门
+            state.add_guard_request_with_reply(request, label, decision_tx);
         }
         AgentEvent::ProgressUpdate {
             turn,
@@ -771,7 +791,107 @@ mod tests {
         );
 
         assert_eq!(state.guard_requests.len(), 1);
-        assert_eq!(state.guard_requests[0].id, "req-1");
+        assert_eq!(state.guard_requests[0].request.id, "req-1");
+        assert!(state.guard_requests[0].reply_tx.is_none());
+        assert!(state.guard_requests[0].label.is_none());
+    }
+
+    #[test]
+    fn test_apply_agent_event_subagent_approval() {
+        let mut state = AppState::new("test-model");
+        let req = ApprovalRequest::new(
+            "req-sub-1".to_string(),
+            "subagent: 计算 2+2".to_string(),
+            "High".to_string(),
+            vec!["subagent action".to_string()],
+            None);
+        let (decision_tx, _decision_rx) = mpsc::channel(4);
+
+        apply_agent_event(
+            AgentEvent::SubagentApprovalNeeded {
+                request: req.clone(),
+                label: "子 agent".to_string(),
+                decision_tx: decision_tx.clone(),
+            },
+            &mut state,
+        );
+
+        assert_eq!(state.guard_requests.len(), 1);
+        assert_eq!(state.guard_requests[0].request.id, "req-sub-1");
+        assert!(state.guard_requests[0].reply_tx.is_some(), "子审批携带回发通道");
+        assert_eq!(
+            state.guard_requests[0].label.as_deref(),
+            Some("子 agent"),
+            "子审批携带来源标签"
+        );
+    }
+
+    #[test]
+    fn test_subagent_approval_routes_decision_through_reply_tx() {
+        let mut state = AppState::new("test-model");
+        let (reply_tx, mut reply_rx) = mpsc::channel(4);
+        state.add_guard_request_with_reply(
+            ApprovalRequest::new(
+                "req-sub-1".to_string(),
+                "subagent action".to_string(),
+                "High".to_string(),
+                vec!["reason".to_string()],
+                None),
+            "子 agent".to_string(),
+            reply_tx,
+        );
+        // 全局决策通道存在时，子审批决定也不得走全局通道（避免与父审批串扰）
+        let (global_tx, mut global_rx) = mpsc::channel(4);
+
+        let should_quit =
+            apply_key_action(KeyAction::ApproveGuardrail, &mut state, Some(&global_tx));
+        assert!(!should_quit);
+        assert!(state.guard_requests.is_empty(), "审批后请求应移除");
+
+        let decision = reply_rx
+            .try_recv()
+            .expect("子审批决定应经 reply_tx 回发");
+        assert_eq!(
+            decision,
+            ApprovalDecision::Approved {
+                by: "user".to_string(),
+                reason: Some("用户批准了该操作".to_string()),
+            }
+        );
+        assert!(
+            global_rx.try_recv().is_err(),
+            "子审批决定不得走全局决策通道"
+        );
+    }
+
+    #[test]
+    fn test_subagent_denial_routes_through_reply_tx() {
+        let mut state = AppState::new("test-model");
+        let (reply_tx, mut reply_rx) = mpsc::channel(4);
+        state.add_guard_request_with_reply(
+            ApprovalRequest::new(
+                "req-sub-1".to_string(),
+                "subagent action".to_string(),
+                "High".to_string(),
+                vec!["reason".to_string()],
+                None),
+            "子 agent".to_string(),
+            reply_tx,
+        );
+
+        let should_quit = apply_key_action(KeyAction::DenyGuardrail, &mut state, None);
+        assert!(!should_quit);
+        assert!(state.guard_requests.is_empty());
+
+        let decision = reply_rx
+            .try_recv()
+            .expect("子审批拒绝决定应经 reply_tx 回发");
+        assert_eq!(
+            decision,
+            ApprovalDecision::Denied {
+                reason: "用户拒绝了该操作".to_string(),
+            }
+        );
     }
 
     #[test]

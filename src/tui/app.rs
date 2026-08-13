@@ -1,5 +1,7 @@
 pub use crate::events::ApprovalRequest;
+use crate::guardrails::approval::ApprovalDecision;
 use crate::types::{Message, ToolResult};
+use tokio::sync::mpsc;
 
 /// Which panel in the TUI has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,6 +65,22 @@ impl Default for StatusInfo {
     }
 }
 
+/// 待审批请求条目：请求展示信息 + 可选的决定回发通道与来源标签。
+///
+/// 父审批（`GuardrailApprovalNeeded`）不带 reply_tx，y/n 决定经全局
+/// decision_tx 发回；子审批（`SubagentApprovalNeeded`）自带 reply_tx
+/// 与 label，决定直接回发给子 loop 的审批门，面板标注审批来源。
+#[derive(Debug, Clone)]
+pub struct GuardRequest {
+    /// 审批请求的展示信息（操作、风险、原因等）。
+    pub request: ApprovalRequest,
+    /// 决定回发通道：Some 时 y/n 决定经此直接回发（子审批）；
+    /// None 时走全局决策通道（父审批）。
+    pub reply_tx: Option<mpsc::Sender<ApprovalDecision>>,
+    /// 审批来源标签（如「子 agent」），面板展示用。
+    pub label: Option<String>,
+}
+
 /// The full application state for the TUI.
 ///
 /// Holds all data that the TUI renders: messages from the agent, the current
@@ -77,7 +95,7 @@ pub struct AppState {
     /// Results from completed tool executions.
     pub tool_results: Vec<ToolResult>,
     /// Pending guardrail approval requests.
-    pub guard_requests: Vec<ApprovalRequest>,
+    pub guard_requests: Vec<GuardRequest>,
     /// Status information for the status bar.
     pub status: StatusInfo,
     /// Whether the agent loop is still running.
@@ -100,9 +118,29 @@ impl AppState {
         }
     }
 
-    /// Add a guardrail approval request to the pending list.
+    /// Add a guardrail approval request to the pending list（父审批：
+    /// 决定走全局决策通道，无来源标签）。
     pub fn add_guard_request(&mut self, request: ApprovalRequest) {
-        self.guard_requests.push(request);
+        self.guard_requests.push(GuardRequest {
+            request,
+            reply_tx: None,
+            label: None,
+        });
+    }
+
+    /// Add a subagent approval request（子审批：决定经事件自带的
+    /// reply_tx 回发，面板标注来源标签）。
+    pub fn add_guard_request_with_reply(
+        &mut self,
+        request: ApprovalRequest,
+        label: String,
+        reply_tx: mpsc::Sender<ApprovalDecision>,
+    ) {
+        self.guard_requests.push(GuardRequest {
+            request,
+            reply_tx: Some(reply_tx),
+            label: Some(label),
+        });
     }
 
     /// Remove a guardrail approval request by ID.
@@ -110,7 +148,7 @@ impl AppState {
     /// Returns `true` if a request was removed.
     pub fn remove_guard_request(&mut self, id: &str) -> bool {
         let len_before = self.guard_requests.len();
-        self.guard_requests.retain(|r| r.id != id);
+        self.guard_requests.retain(|r| r.request.id != id);
         self.guard_requests.len() < len_before
     }
 
@@ -218,7 +256,34 @@ mod tests {
             None);
         state.add_guard_request(req.clone());
         assert_eq!(state.guard_requests.len(), 1);
-        assert_eq!(state.guard_requests[0], req);
+        assert_eq!(state.guard_requests[0].request, req);
+        assert!(state.guard_requests[0].reply_tx.is_none(), "父审批无回发通道");
+        assert!(state.guard_requests[0].label.is_none(), "父审批无来源标签");
+    }
+
+    #[test]
+    fn test_app_state_add_guard_request_with_reply() {
+        let mut state = AppState::new("gpt-4o");
+        let req = ApprovalRequest::new(
+            "req-sub-1".to_string(),
+            "subagent: 计算 2+2".to_string(),
+            "High".to_string(),
+            vec!["subagent action".to_string()],
+            None);
+        let (reply_tx, _reply_rx) = mpsc::channel(4);
+        state.add_guard_request_with_reply(
+            req.clone(),
+            "子 agent".to_string(),
+            reply_tx.clone(),
+        );
+        assert_eq!(state.guard_requests.len(), 1);
+        assert_eq!(state.guard_requests[0].request, req);
+        assert!(state.guard_requests[0].reply_tx.is_some(), "子审批携带回发通道");
+        assert_eq!(
+            state.guard_requests[0].label.as_deref(),
+            Some("子 agent"),
+            "子审批携带来源标签"
+        );
     }
 
     #[test]
@@ -239,7 +304,7 @@ mod tests {
 
         assert!(state.remove_guard_request("req-1"));
         assert_eq!(state.guard_requests.len(), 1);
-        assert_eq!(state.guard_requests[0].id, "req-2");
+        assert_eq!(state.guard_requests[0].request.id, "req-2");
 
         assert!(!state.remove_guard_request("nonexistent"));
         assert_eq!(state.guard_requests.len(), 1);

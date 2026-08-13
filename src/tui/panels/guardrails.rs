@@ -49,7 +49,22 @@ fn build_widget(state: &AppState) -> Paragraph<'_> {
         )));
         lines.push(Line::from(""));
 
-        for request in &state.guard_requests {
+        for entry in &state.guard_requests {
+            let request = &entry.request;
+
+            // 来源标签（子 agent 审批）：面板顶部标注审批来源
+            if let Some(label) = &entry.label {
+                lines.push(Line::from(vec![
+                    Span::styled("  来源: ", Style::default().fg(COLOR_LABEL)),
+                    Span::styled(
+                        label.clone(),
+                        Style::default().fg(COLOR_HEADER).add_modifier(
+                            ratatui::style::Modifier::BOLD,
+                        ),
+                    ),
+                ]));
+            }
+
             // Risk level with color
             let (risk_cn, risk_color) = match request.risk_level.to_lowercase().as_str() {
                 "critical" => ("严重", COLOR_RISK_HIGH),
@@ -311,6 +326,36 @@ mod tests {
         assert!(
             content.contains("风险: 严重"),
             "Expected Critical risk, got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_guardrails_subagent_request_shows_source_label() {
+        let mut state = AppState::new("test-model");
+        let (reply_tx, _reply_rx) = tokio::sync::mpsc::channel(4);
+        state.add_guard_request_with_reply(
+            ApprovalRequest::new(
+                "req-sub-1".to_string(),
+                "subagent: 计算 2+2".to_string(),
+                "High".to_string(),
+                vec![],
+                None),
+            "子 agent".to_string(),
+            reply_tx,
+        );
+
+        let buffer = render_to_buffer(&state, 80, 12);
+        let content = buffer_to_string(&buffer);
+
+        assert!(
+            content.contains("来源: 子 agent"),
+            "子审批条目应标注来源标签，got: {}",
+            content
+        );
+        assert!(
+            content.contains("subagent: 计算 2+2"),
+            "Expected action summary, got: {}",
             content
         );
     }

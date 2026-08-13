@@ -3,6 +3,7 @@
 //! The `AgentEvent` enum is the primary communication channel from the
 //! background agent loop to the foreground UI (TUI or REPL task consumer).
 
+use crate::guardrails::approval::ApprovalDecision;
 use crate::types::Message;
 
 // ============================================================================
@@ -38,6 +39,19 @@ pub enum AgentEvent {
     /// A guardrail approval is needed.
     GuardrailApprovalNeeded {
         request: ApprovalRequest,
+    },
+    /// 子 agent 的护栏审批请求（TUI 模式）。
+    ///
+    /// 子 loop 运行在父工具执行期间的子线程里，其审批门无法读 stdin
+    /// （crossterm raw mode），因此请求以事件路由到父界面面板渲染；
+    /// y/n 决定经事件自带的 `decision_tx`（子专属通道）回发，
+    /// 不与父审批的全局决策通道混用。
+    SubagentApprovalNeeded {
+        request: ApprovalRequest,
+        /// 审批来源标签（如「子 agent」），供面板区分父子审批。
+        label: String,
+        /// 决定回发通道：UI 按键产生的决定直接发回子 loop 的审批门。
+        decision_tx: tokio::sync::mpsc::Sender<ApprovalDecision>,
     },
     /// Progress update (turn, tokens, risk level).
     ProgressUpdate {

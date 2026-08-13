@@ -167,10 +167,21 @@ async fn main() -> Result<()> {
             } else {
                 // TUI mode — event channel for live updates, plus a decision
                 // channel so guardrail y/n keypresses reach the approval gate.
-                // 子 agent 装配暂缺（步骤 7 接入事件路由后启用）。
+                // 子审批经事件路由到 TUI 面板：审批请求以
+                // SubagentApprovalNeeded 事件到达，决定经事件自带的
+                // 通道回发给子 loop（与父审批的全局决策通道分离）。
                 let (tx, rx) = mpsc::channel::<AgentEvent>(32);
                 let (decision_tx, decision_rx) = mpsc::channel::<ApprovalDecision>(4);
-                let agent = build_agent(&config, &api_key, workspace, Some(tx), Some(decision_rx), None)?;
+                let subagent = build_subagent_wiring(
+                    &config,
+                    &api_key,
+                    &workspace,
+                    SubagentApproval::UiEvents {
+                        event_tx: tx.clone(),
+                        label: "子 agent".to_string(),
+                    },
+                );
+                let agent = build_agent(&config, &api_key, workspace, Some(tx), Some(decision_rx), Some(subagent))?;
                 let model = config.llm.model.clone();
                 run_tui(agent, task, rx, decision_tx, model).await
             }
@@ -1793,9 +1804,18 @@ fn build_agent(
             SubagentApproval::InBandStdin => {
                 ApprovalGate::new_with_context(approval_timeout, Some("子 agent"))
             }
-            SubagentApproval::UiEvents { .. } => {
-                // TODO(步骤 7)：子审批以事件路由到 TUI 面板
-                ApprovalGate::new_with_context(approval_timeout, Some("子 agent"))
+            SubagentApproval::UiEvents { event_tx, label } => {
+                // TUI：子审批请求以 SubagentApprovalNeeded 事件发给父界面
+                // 面板，y/n 决定经事件自带的 reply_tx 回发（子专属通道，
+                // 不与父审批的全局决策通道混用）
+                let (reply_tx, decision_rx) = mpsc::channel::<ApprovalDecision>(4);
+                ApprovalGate::with_subagent_ui_events(
+                    approval_timeout,
+                    event_tx.clone(),
+                    decision_rx,
+                    reply_tx,
+                    label.clone(),
+                )
             }
         },
         // TUI 模式（父 loop）：stdin 被 crossterm raw mode 接管，审批通过事件通道
