@@ -305,7 +305,11 @@ mod tests {
         let handle = tokio::spawn(async move {
             child2.spawn("task", IsolationMode::SameProcess).await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // 轮询等待子层 agent 进入运行态（高负载下固定 sleep 不可靠）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while spawner2.active_count() < 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         assert_eq!(spawner2.active_count(), 1, "子层运行中，根层应看到计数 1");
         let result = handle.await.unwrap();
         assert!(result.is_ok());
@@ -399,8 +403,11 @@ mod tests {
             s4.spawn("task4", IsolationMode::SameProcess).await
         });
 
-        // Give them time to increment active_count and reach the barrier
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // 轮询等待两个 agent 都进入运行态（高负载下固定 sleep 不可靠）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while spawner2.active_count() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
 
         // active_count should now be 2
         assert_eq!(spawner2.active_count(), 2);
