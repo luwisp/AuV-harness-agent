@@ -113,31 +113,31 @@ impl RiskAssessor for CommandRiskAssessor {
 
         // sudo → High (score 3)
         if has_sudo(&command) {
-            reasons.push("Command uses sudo (privilege escalation)".to_string());
+            reasons.push("命令使用了 sudo（权限提升）".to_string());
             risk_score += 3;
         }
 
         // pipe → Medium (score 1)
         if command.contains('|') {
-            reasons.push("Command uses pipes (data piped between processes)".to_string());
+            reasons.push("命令使用了管道符 |（进程间数据传输）".to_string());
             risk_score += 1;
         }
 
         // redirect → Medium (score 1)
         if command.contains('>') {
-            reasons.push("Command uses output redirection".to_string());
+            reasons.push("命令使用了输出重定向".to_string());
             risk_score += 1;
         }
 
         // curl/wget → Medium (score 1)
         if has_curl_or_wget(&command) {
-            reasons.push("Command downloads from network (curl/wget)".to_string());
+            reasons.push("命令从网络下载数据（curl/wget）".to_string());
             risk_score += 1;
         }
 
         // chain → Medium (score 1)
         if command.contains("&&") {
-            reasons.push("Command uses chain operator (&&)".to_string());
+            reasons.push("命令使用了链式操作符 &&".to_string());
             risk_score += 1;
         }
 
@@ -148,7 +148,7 @@ impl RiskAssessor for CommandRiskAssessor {
         };
 
         let suggested_mitigation = if level >= RiskLevel::Medium {
-            Some("Review the command and its effects before executing".to_string())
+            Some("执行前请仔细检查该命令及其影响".to_string())
         } else {
             None
         };
@@ -187,7 +187,7 @@ impl RiskAssessor for FileRiskAssessor {
         // System directories → Critical (highest priority)
         if is_system_directory(&path) {
             reasons.push(format!(
-                "File path targets system directory: {}",
+                "文件路径指向系统目录：{}",
                 path
             ));
             level = RiskLevel::Critical;
@@ -196,7 +196,7 @@ impl RiskAssessor for FileRiskAssessor {
         // Path outside workspace → High
         if is_outside_workspace(&path, &context.workspace_root) {
             reasons.push(format!(
-                "File path is outside workspace: {}",
+                "文件路径在工作区之外：{}",
                 path
             ));
             if level < RiskLevel::High {
@@ -206,24 +206,24 @@ impl RiskAssessor for FileRiskAssessor {
 
         // Hidden files → Low (informational, don't downgrade higher levels)
         if is_hidden_file(&path) {
-            reasons.push(format!("File is hidden: {}", path));
+            reasons.push(format!("文件是隐藏文件：{}", path));
             // Keep higher risk level if already set; hidden is just informative
         }
 
         // Large number of files → Medium
         if affects_multiple_files(action) {
-            reasons.push("Operation affects multiple files".to_string());
+            reasons.push("操作会影响多个文件".to_string());
             if level < RiskLevel::Medium {
                 level = RiskLevel::Medium;
             }
         }
 
         let suggested_mitigation = if level >= RiskLevel::Critical {
-            Some("System directory modification is highly dangerous; verify intent".to_string())
+            Some("修改系统目录非常危险，请确认操作意图".to_string())
         } else if level >= RiskLevel::High {
-            Some("Verify the file path is intended and safe".to_string())
+            Some("请确认文件路径符合预期且安全".to_string())
         } else if level >= RiskLevel::Medium {
-            Some("Review the files being modified".to_string())
+            Some("请检查将被修改的文件".to_string())
         } else {
             None
         };
@@ -260,7 +260,7 @@ impl RiskAssessor for NetworkRiskAssessor {
         if let Some(ref cmd) = command {
             if has_data_exfiltration(cmd) {
                 reasons.push(
-                    "Command may exfiltrate data (curl POST, scp)".to_string(),
+                    "命令可能外传数据（curl POST、scp）".to_string(),
                 );
                 level = RiskLevel::High;
             }
@@ -269,20 +269,20 @@ impl RiskAssessor for NetworkRiskAssessor {
         // Check for outbound HTTP → Medium
         if level < RiskLevel::High {
             if is_network_tool {
-                reasons.push("Network request to external service".to_string());
+                reasons.push("向外部服务发起网络请求".to_string());
                 level = RiskLevel::Medium;
             } else if let Some(ref cmd) = command {
                 if has_curl_or_wget(cmd) {
-                    reasons.push("Command makes network request (curl/wget)".to_string());
+                    reasons.push("命令发起网络请求（curl/wget）".to_string());
                     level = RiskLevel::Medium;
                 }
             }
         }
 
         let suggested_mitigation = if level >= RiskLevel::High {
-            Some("Ensure data exfiltration is not occurring".to_string())
+            Some("请确保未发生数据外传".to_string())
         } else if level >= RiskLevel::Medium {
-            Some("Verify the network destination is trusted".to_string())
+            Some("请确认网络目标可信".to_string())
         } else {
             None
         };

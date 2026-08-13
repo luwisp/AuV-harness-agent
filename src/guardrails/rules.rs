@@ -68,48 +68,48 @@ impl StaticRuleEngine {
         // Priority 100 – hard blocks
         self.add_rule(GuardRule {
             id: "deny-rm-rf-root".into(),
-            name: "Block rm -rf /".into(),
+            name: "拦截 rm -rf /".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*rm -rf /**".into()],
             },
-            action: RuleAction::Deny("Destructive recursive deletion of root".into()),
+            action: RuleAction::Deny("破坏性的根目录递归删除".into()),
             priority: 100,
         });
 
         self.add_rule(GuardRule {
             id: "deny-drop-database".into(),
-            name: "Block DROP DATABASE".into(),
+            name: "拦截 DROP DATABASE".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*DROP DATABASE*".into()],
             },
-            action: RuleAction::Deny("Database deletion blocked".into()),
+            action: RuleAction::Deny("数据库删除被拦截".into()),
             priority: 100,
         });
 
         self.add_rule(GuardRule {
             id: "deny-dd-if".into(),
-            name: "Block dd if=".into(),
+            name: "拦截 dd if=".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*dd if=*".into()],
             },
-            action: RuleAction::Deny("Block-level device operations blocked".into()),
+            action: RuleAction::Deny("块级设备操作被拦截".into()),
             priority: 100,
         });
 
         self.add_rule(GuardRule {
             id: "deny-mkfs".into(),
-            name: "Block mkfs.*".into(),
+            name: "拦截 mkfs.*".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["mkfs.*".into()],
             },
-            action: RuleAction::Deny("Filesystem creation blocked".into()),
+            action: RuleAction::Deny("文件系统创建被拦截".into()),
             priority: 100,
         });
 
         // Priority 50 – escalations
         self.add_rule(GuardRule {
             id: "escalate-rm-rf-home".into(),
-            name: "Escalate rm -rf ~".into(),
+            name: "升级审批 rm -rf ~".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*rm -rf ~*".into()],
             },
@@ -119,7 +119,7 @@ impl StaticRuleEngine {
 
         self.add_rule(GuardRule {
             id: "escalate-drop-table".into(),
-            name: "Escalate DROP TABLE".into(),
+            name: "升级审批 DROP TABLE".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*DROP TABLE*".into()],
             },
@@ -129,7 +129,7 @@ impl StaticRuleEngine {
 
         self.add_rule(GuardRule {
             id: "escalate-curl-pipe-bash".into(),
-            name: "Escalate curl | bash".into(),
+            name: "升级审批 curl | bash".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*curl*|*bash*".into()],
             },
@@ -139,7 +139,7 @@ impl StaticRuleEngine {
 
         self.add_rule(GuardRule {
             id: "escalate-git-push-force".into(),
-            name: "Escalate git push --force".into(),
+            name: "升级审批 git push --force".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*git push*--force*".into(), "*git push*-f*".into()],
             },
@@ -149,7 +149,7 @@ impl StaticRuleEngine {
 
         self.add_rule(GuardRule {
             id: "escalate-chmod-777".into(),
-            name: "Escalate chmod 777".into(),
+            name: "升级审批 chmod 777".into(),
             pattern: RulePattern::CommandGlob {
                 globs: vec!["*chmod 777*".into()],
             },
@@ -160,7 +160,7 @@ impl StaticRuleEngine {
         // File-path based rules (all escalation)
         self.add_rule(GuardRule {
             id: "escalate-write-etc".into(),
-            name: "Escalate write to /etc/*".into(),
+            name: "升级审批 写入 /etc/*".into(),
             pattern: RulePattern::FilePath {
                 paths: vec!["/etc/**".into()],
                 op: FileOp::Write,
@@ -171,7 +171,7 @@ impl StaticRuleEngine {
 
         self.add_rule(GuardRule {
             id: "escalate-write-ssh".into(),
-            name: "Escalate write to ~/.ssh/*".into(),
+            name: "升级审批 写入 ~/.ssh/*".into(),
             pattern: RulePattern::FilePath {
                 paths: vec!["~/.ssh/**".into()],
                 op: FileOp::Write,
@@ -182,7 +182,7 @@ impl StaticRuleEngine {
 
         self.add_rule(GuardRule {
             id: "escalate-write-dotenv".into(),
-            name: "Escalate write to .env".into(),
+            name: "升级审批 写入 .env".into(),
             pattern: RulePattern::FilePath {
                 paths: vec!["**/.env".into()],
                 op: FileOp::Write,
@@ -211,7 +211,7 @@ impl StaticRuleEngine {
                     RuleAction::Escalate => GuardResult::NeedsApproval {
                         risk_level: "High".into(),
                         reasons: vec![format!(
-                            "Rule '{}' triggered: {}",
+                            "规则 '{}' 触发：{}",
                             rule.id, rule.name
                         )],
                     },

@@ -8,6 +8,10 @@ pub mod sandbox;
 #[cfg(test)]
 use std::time::Duration;
 
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
 use crate::guardrails::approval::{ApprovalDecision, ApprovalGate};
 use crate::guardrails::assessor::{RiskAssessment, RiskAssessor, RiskLevel};
 use crate::guardrails::audit::{AuditEntry, AuditLog};
@@ -15,6 +19,113 @@ use crate::guardrails::rules::StaticRuleEngine;
 use crate::guardrails::sandbox::SandboxBoundary;
 use crate::types::{Action, GuardDecision, GuardResult};
 use chrono::Utc;
+
+// ============================================================================
+// ApprovalLevel（审批力度）
+// ============================================================================
+
+/// 护栏审批力度：调整人工审批的触发阈值。
+///
+/// 按用户定义的字面位置映射，档位决定「风险等级低于等于阈值时自动批准」：
+///
+/// | 档位 | 自动批准阈值 | 行为 |
+/// |------|-------------|------|
+/// | 无   | 高          | 仅严重（Critical）需审批 |
+/// | 低   | 中          | 高/严重需审批（默认，与旧行为一致） |
+/// | 中   | 低          | 中及以上需审批 |
+/// | 高   | 无          | 所有风险等级的工具调用都需审批 |
+///
+/// 静态规则的 Deny（L1）始终硬拦截，不受力度影响；静态规则 Escalate
+/// 会把评估等级抬到高，在「无」档下同样自动批准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalLevel {
+    /// 无力度：风险 ≤ 高自动批准（仅严重需审批）。
+    /// 序列化主值为英文 `none`，中文「无」为兼容别名。
+    #[serde(rename = "none", alias = "无")]
+    None,
+    /// 低力度：风险 ≤ 中自动批准（高/严重需审批）。
+    /// 序列化主值为英文 `low`，中文「低」为兼容别名。
+    #[serde(rename = "low", alias = "低")]
+    Low,
+    /// 中力度：风险 ≤ 低自动批准（中及以上需审批）。
+    /// 序列化主值为英文 `medium`，中文「中」为兼容别名。
+    #[serde(rename = "medium", alias = "中")]
+    Medium,
+    /// 高力度：所有风险等级的工具调用都需审批。
+    /// 序列化主值为英文 `high`，中文「高」为兼容别名。
+    #[serde(rename = "high", alias = "高")]
+    High,
+}
+
+impl Default for ApprovalLevel {
+    /// 默认「低」：High/Critical 触发审批，与历史行为一致。
+    fn default() -> Self {
+        Self::Low
+    }
+}
+
+impl ApprovalLevel {
+    /// 自动批准阈值：风险等级 ≤ 阈值时无需审批，直接放行。
+    /// `None` 表示没有任何等级可自动批准（所有风险都需审批）。
+    pub fn auto_approve_threshold(self) -> Option<RiskLevel> {
+        match self {
+            Self::None => Some(RiskLevel::High),
+            Self::Low => Some(RiskLevel::Medium),
+            Self::Medium => Some(RiskLevel::Low),
+            Self::High => None,
+        }
+    }
+
+    /// 中文档位名。
+    pub fn cn_name(self) -> &'static str {
+        match self {
+            Self::None => "无",
+            Self::Low => "低",
+            Self::Medium => "中",
+            Self::High => "高",
+        }
+    }
+
+    /// 中文档位说明（用于 /approval 帮助与文档）。
+    pub fn cn_description(self) -> &'static str {
+        match self {
+            Self::None => "风险等级 ≤ 高 自动批准（仅严重需审批）",
+            Self::Low => "风险等级 ≤ 中 自动批准（高/严重需审批，默认）",
+            Self::Medium => "风险等级 ≤ 低 自动批准（中及以上需审批）",
+            Self::High => "所有风险等级的工具调用都需审批",
+        }
+    }
+}
+
+impl FromStr for ApprovalLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "无" | "none" => Ok(Self::None),
+            "低" | "low" => Ok(Self::Low),
+            "中" | "medium" => Ok(Self::Medium),
+            "高" | "high" => Ok(Self::High),
+            other => Err(format!("无效的审批力度「{other}」，可选：无/低/中/高")),
+        }
+    }
+}
+
+impl clap::ValueEnum for ApprovalLevel {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::None, Self::Low, Self::Medium, Self::High]
+    }
+
+    /// CLI 主值为英文（none/low/medium/high），中文档位名为兼容别名。
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(match self {
+            Self::None => clap::builder::PossibleValue::new("none").alias("无"),
+            Self::Low => clap::builder::PossibleValue::new("low").alias("低"),
+            Self::Medium => clap::builder::PossibleValue::new("medium").alias("中"),
+            Self::High => clap::builder::PossibleValue::new("high").alias("高"),
+        })
+    }
+}
 
 /// Context passed to guardrail evaluation.
 ///
@@ -43,8 +154,9 @@ pub struct GuardContext {
 ///    returns `Denied`, the pipeline stops immediately.
 /// 2. **Risk assessment** — All registered assessors evaluate the action and
 ///    their results are merged into a single risk level.
-/// 3. **Approval** — If the merged risk level is `High` or `Critical`, the
-///    human-in-the-loop approval gate is invoked.
+/// 3. **Approval** — If the merged risk level exceeds the auto-approval
+///    threshold of the configured [`ApprovalLevel`], the human-in-the-loop
+///    approval gate is invoked (default「低」: `High`/`Critical`).
 /// 4. **Sandbox** — Hard boundary enforcement that cannot be overridden by
 ///    approval.
 pub struct GuardrailPipeline {
@@ -53,6 +165,8 @@ pub struct GuardrailPipeline {
     approval: ApprovalGate,
     sandbox: SandboxBoundary,
     audit: AuditLog,
+    /// 审批力度：决定风险评估（L2）达到什么等级才触发人工审批（L3）。
+    approval_level: ApprovalLevel,
 }
 
 impl GuardrailPipeline {
@@ -63,6 +177,7 @@ impl GuardrailPipeline {
         approval: ApprovalGate,
         sandbox: SandboxBoundary,
         audit: AuditLog,
+        approval_level: ApprovalLevel,
     ) -> Self {
         Self {
             rules,
@@ -70,7 +185,13 @@ impl GuardrailPipeline {
             approval,
             sandbox,
             audit,
+            approval_level,
         }
+    }
+
+    /// 运行时调整审批力度（REPL `/approval` 指令，无需重建管线）。
+    pub fn set_approval_level(&mut self, level: ApprovalLevel) {
+        self.approval_level = level;
     }
 
     /// Convenience constructor for tests: build a pipeline with default
@@ -88,6 +209,7 @@ impl GuardrailPipeline {
             approval: ApprovalGate::new(Duration::from_millis(1)),
             sandbox,
             audit: AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            approval_level: ApprovalLevel::default(),
         }
     }
 
@@ -112,7 +234,7 @@ impl GuardrailPipeline {
                 risk_level: "Low".to_string(),
                 decision: "Denied".to_string(),
                 approver: None,
-                reasons: vec!["Blocked by static rule".to_string()],
+                reasons: vec!["被静态规则拦截".to_string()],
             });
             return rule_result;
         }
@@ -130,7 +252,7 @@ impl GuardrailPipeline {
                     level: RiskLevel::High,
                     reasons: reasons.clone(),
                     suggested_mitigation: Some(
-                        "Static rule escalation — requires human approval".to_string(),
+                        "静态规则升级——需要人工审批".to_string(),
                     ),
                 }
             } else {
@@ -153,8 +275,18 @@ impl GuardrailPipeline {
             "GuardrailPipeline[L2]: risk assessment complete"
         );
 
-        // Layer 3: Approval — if risk is High or Critical
-        if assessment.level >= RiskLevel::High {
+        // Layer 3: Approval — 仅工具调用需要人工审批；风险等级超过审批力度
+        // 的自动批准阈值时触发。final_answer / ask_user 等无执行副作用的
+        // 动作直接放行（即使力度「高」也不拦截，否则力度「高」时 agent
+        // 的正常回复都会被审批门卡住）。
+        // 默认力度「低」（阈值=中）：High/Critical 触发审批，与旧行为一致；
+        // 「无」档仅 Critical 审批、「高」档所有等级都审批（见 ApprovalLevel）。
+        let needs_approval = matches!(action, Action::ToolCall { .. })
+            && match self.approval_level.auto_approve_threshold() {
+                None => true,
+                Some(threshold) => assessment.level > threshold,
+            };
+        if needs_approval {
             tracing::info!(
                 action = ?action,
                 session_id = %ctx.session_id,
@@ -217,7 +349,7 @@ impl GuardrailPipeline {
                         reasons: assessment_reasons,
                     });
                     return GuardResult::Denied {
-                        reason: "Approval request timed out".to_string(),
+                        reason: "审批请求超时".to_string(),
                         decision: GuardDecision::Timeout,
                     };
                 }
@@ -412,6 +544,7 @@ mod tests {
             ApprovalGate::new(Duration::from_millis(1)),
             sandbox,
             AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::default(),
         );
         let ctx = test_context();
 
@@ -465,18 +598,20 @@ mod tests {
             ApprovalGate::new(Duration::from_millis(1)),
             sandbox,
             AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::default(),
         );
         let ctx = test_context();
 
-        // sudo echo > /etc/passwd: CommandRiskAssessor → High (sudo),
-        // FileRiskAssessor → Critical (/etc), NetworkRiskAssessor → Low
-        // Merged → Critical → triggers approval → timeout → Denied
+        // sudo echo config > /etc/app.conf：CommandRiskAssessor → High
+        // （sudo=3）。FileRiskAssessor/NetworkRiskAssessor 对 bash 动作
+        // 不识别路径/网络外传，均为 Low。Merged → High → 默认力度「低」
+        // （阈值=中）触发审批 → 超时 → Denied
         let result = pipeline
             .check(&bash_action("sudo echo config > /etc/app.conf"), &ctx)
             .await;
         assert!(
             result.is_denied(),
-            "sudo + write to /etc should be Critical and escalate to approval, got {:?}",
+            "sudo should be High and escalate to approval, got {:?}",
             result
         );
     }
@@ -539,6 +674,282 @@ mod tests {
         assert!(
             result.is_denied(),
             "dd if= should be Denied by L1 static rules, got {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ApprovalLevel（审批力度）单元测试
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_approval_level_threshold_mapping() {
+        assert_eq!(
+            ApprovalLevel::None.auto_approve_threshold(),
+            Some(RiskLevel::High)
+        );
+        assert_eq!(
+            ApprovalLevel::Low.auto_approve_threshold(),
+            Some(RiskLevel::Medium)
+        );
+        assert_eq!(
+            ApprovalLevel::Medium.auto_approve_threshold(),
+            Some(RiskLevel::Low)
+        );
+        assert_eq!(ApprovalLevel::High.auto_approve_threshold(), None);
+        // 默认档位保持历史行为
+        assert_eq!(ApprovalLevel::default(), ApprovalLevel::Low);
+    }
+
+    #[test]
+    fn test_approval_level_from_str_parses_chinese_and_english() {
+        assert_eq!("无".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::None);
+        assert_eq!("低".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::Low);
+        assert_eq!("中".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::Medium);
+        assert_eq!("高".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::High);
+        assert_eq!("none".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::None);
+        assert_eq!("LOW".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::Low);
+        assert_eq!(
+            "Medium".parse::<ApprovalLevel>().unwrap(),
+            ApprovalLevel::Medium
+        );
+        assert_eq!("HIGH".parse::<ApprovalLevel>().unwrap(), ApprovalLevel::High);
+        assert!("".parse::<ApprovalLevel>().is_err());
+        assert!("无敌".parse::<ApprovalLevel>().is_err());
+    }
+
+    #[test]
+    fn test_approval_level_cn_descriptions_cover_all_levels() {
+        for level in [
+            ApprovalLevel::None,
+            ApprovalLevel::Low,
+            ApprovalLevel::Medium,
+            ApprovalLevel::High,
+        ] {
+            assert!(!level.cn_name().is_empty());
+            assert!(!level.cn_description().is_empty());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ApprovalLevel（审批力度）管线行为测试
+    // -----------------------------------------------------------------------
+    //
+    // 约定：审批门使用 1ms 超时——只要触发审批就必然超时→Denied，
+    // 因此「Allowed」结果证明没有触发审批，「Denied」证明触发了审批。
+
+    /// 力度「无」（阈值=高）：High 自动批准，仅 Critical 触发审批；
+    /// L1 静态规则 Deny 始终硬拦截，不受力度影响。
+    #[tokio::test]
+    async fn test_approval_level_none_auto_approves_high_but_not_critical() {
+        let rules = engine_with_builtins();
+        let assessors: Vec<Box<dyn RiskAssessor>> = vec![
+            Box::new(CommandRiskAssessor),
+            Box::new(FileRiskAssessor),
+        ];
+        // 工作区根设为 /，避免 L4 沙箱在审批判定之前拦截写 /etc 的用例
+        // （沙箱的工作区约束是硬边界，与审批力度无关）
+        let sandbox = SandboxBoundary {
+            workspace_root: PathBuf::from("/"),
+            allowed_commands: vec![],
+            forbidden_commands: vec![],
+            max_timeout: Duration::from_secs(300),
+            network_allowed: true,
+        };
+        let mut pipeline = GuardrailPipeline::new(
+            rules,
+            assessors,
+            ApprovalGate::new(Duration::from_millis(1)),
+            sandbox,
+            AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::None,
+        );
+        let ctx = test_context();
+
+        // L1 Deny 硬拦截，不受力度影响
+        let result = pipeline.check(&bash_action("rm -rf /"), &ctx).await;
+        assert!(
+            result.is_denied(),
+            "「无」档下 L1 静态规则 Deny 仍应硬拦截，got {:?}",
+            result
+        );
+
+        // sudo ls → CommandRiskAssessor High（sudo=3）→ High ≤ 高 → 自动批准
+        let result = pipeline.check(&bash_action("sudo ls"), &ctx).await;
+        assert!(
+            result.is_allowed(),
+            "「无」档下 High 应自动批准（不触发审批门），got {:?}",
+            result
+        );
+
+        // write_file 指向系统目录 /etc → FileRiskAssessor Critical（bash 类
+        // 动作不会产生 Critical，评估器对文件路径仅识别文件工具）
+        // → Critical > 高 → 审批 → 超时 → Denied
+        let result = pipeline
+            .check(&write_file_action("/etc/app.conf"), &ctx)
+            .await;
+        assert!(
+            result.is_denied(),
+            "「无」档下 Critical 仍需审批（超时→拒绝），got {:?}",
+            result
+        );
+    }
+
+    /// 力度「高」（阈值=无）：所有风险等级（含 Low）都需审批。
+    #[tokio::test]
+    async fn test_approval_level_high_requires_approval_for_low_risk() {
+        let rules = StaticRuleEngine::new();
+        let assessors: Vec<Box<dyn RiskAssessor>> = vec![Box::new(CommandRiskAssessor)];
+        let sandbox = permissive_sandbox();
+        let mut pipeline = GuardrailPipeline::new(
+            rules,
+            assessors,
+            ApprovalGate::new(Duration::from_millis(1)),
+            sandbox,
+            AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::High,
+        );
+        let ctx = test_context();
+
+        // ls → 0 分 → Low → 高力度下仍需审批 → 超时 → Denied
+        let result = pipeline.check(&bash_action("ls"), &ctx).await;
+        assert!(
+            result.is_denied(),
+            "「高」档下 Low 也需审批（超时→拒绝），got {:?}",
+            result
+        );
+    }
+
+    /// 力度「中」（阈值=低）：Low 自动批准，Medium 及以上需审批。
+    #[tokio::test]
+    async fn test_approval_level_medium_threshold() {
+        let rules = StaticRuleEngine::new();
+        let assessors: Vec<Box<dyn RiskAssessor>> = vec![Box::new(CommandRiskAssessor)];
+        let sandbox = permissive_sandbox();
+        let mut pipeline = GuardrailPipeline::new(
+            rules,
+            assessors,
+            ApprovalGate::new(Duration::from_millis(1)),
+            sandbox,
+            AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::Medium,
+        );
+        let ctx = test_context();
+
+        // ls → Low ≤ 低 → 自动批准
+        let result = pipeline.check(&bash_action("ls"), &ctx).await;
+        assert!(
+            result.is_allowed(),
+            "「中」档下 Low 应自动批准，got {:?}",
+            result
+        );
+
+        // ls | grep x → pipe=1 → Medium > 低 → 审批 → 超时 → Denied
+        let result = pipeline.check(&bash_action("ls | grep x"), &ctx).await;
+        assert!(
+            result.is_denied(),
+            "「中」档下 Medium 应触发审批（超时→拒绝），got {:?}",
+            result
+        );
+    }
+
+    /// 力度「低」（默认，阈值=中）：Medium 自动批准，High 需审批——保持旧行为。
+    #[tokio::test]
+    async fn test_approval_level_low_keeps_legacy_behavior() {
+        let rules = StaticRuleEngine::new();
+        let assessors: Vec<Box<dyn RiskAssessor>> = vec![Box::new(CommandRiskAssessor)];
+        let sandbox = permissive_sandbox();
+        let mut pipeline = GuardrailPipeline::new(
+            rules,
+            assessors,
+            ApprovalGate::new(Duration::from_millis(1)),
+            sandbox,
+            AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::Low,
+        );
+        let ctx = test_context();
+
+        // ls | grep x → Medium ≤ 中 → 自动批准
+        let result = pipeline.check(&bash_action("ls | grep x"), &ctx).await;
+        assert!(
+            result.is_allowed(),
+            "「低」档下 Medium 应自动批准，got {:?}",
+            result
+        );
+
+        // sudo ls → High > 中 → 审批 → 超时 → Denied
+        let result = pipeline.check(&bash_action("sudo ls"), &ctx).await;
+        assert!(
+            result.is_denied(),
+            "「低」档下 High 应触发审批（超时→拒绝），got {:?}",
+            result
+        );
+    }
+
+    /// 力度「高」：final_answer 等非工具动作不经过审批门（无执行副作用）。
+    /// 回归：力度「高」时若把所有动作都送审批，agent 的正常回复会被
+    /// 审批超时卡死（见审计日志 final_answer → Timeout 的事故）。
+    #[tokio::test]
+    async fn test_approval_level_high_does_not_gate_final_answer() {
+        let rules = StaticRuleEngine::new();
+        let assessors: Vec<Box<dyn RiskAssessor>> = vec![Box::new(CommandRiskAssessor)];
+        let sandbox = permissive_sandbox();
+        let mut pipeline = GuardrailPipeline::new(
+            rules,
+            assessors,
+            ApprovalGate::new(Duration::from_millis(1)),
+            sandbox,
+            AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::High,
+        );
+        let ctx = test_context();
+
+        let action = Action::FinalAnswer {
+            summary: "任务完成".to_string(),
+        };
+        let result = pipeline.check(&action, &ctx).await;
+        assert!(
+            result.is_allowed(),
+            "final_answer 不应触发审批（即使力度「高」），got {:?}",
+            result
+        );
+    }
+
+    /// set_approval_level 运行时调整立即生效（REPL /approval 指令路径）。
+    #[tokio::test]
+    async fn test_set_approval_level_takes_effect_immediately() {
+        let rules = StaticRuleEngine::new();
+        let assessors: Vec<Box<dyn RiskAssessor>> = vec![Box::new(CommandRiskAssessor)];
+        let sandbox = permissive_sandbox();
+        let mut pipeline = GuardrailPipeline::new(
+            rules,
+            assessors,
+            ApprovalGate::new(Duration::from_millis(1)),
+            sandbox,
+            AuditLog::new(std::path::PathBuf::from("/dev/null")),
+            ApprovalLevel::Low,
+        );
+        let ctx = test_context();
+
+        // 初始「低」：sudo ls → High → 审批 → Denied
+        let result = pipeline.check(&bash_action("sudo ls"), &ctx).await;
+        assert!(result.is_denied());
+
+        // 切到「无」：同样命令 → High ≤ 高 → 自动批准
+        pipeline.set_approval_level(ApprovalLevel::None);
+        let result = pipeline.check(&bash_action("sudo ls"), &ctx).await;
+        assert!(
+            result.is_allowed(),
+            "set_approval_level(无) 后 High 应自动批准，got {:?}",
+            result
+        );
+
+        // 切到「高」：ls → Low → 审批 → Denied
+        pipeline.set_approval_level(ApprovalLevel::High);
+        let result = pipeline.check(&bash_action("ls"), &ctx).await;
+        assert!(
+            result.is_denied(),
+            "set_approval_level(高) 后 Low 也应审批，got {:?}",
             result
         );
     }

@@ -15,7 +15,7 @@ use harness_agent::guardrails::assessor::{
 };
 use harness_agent::guardrails::rules::StaticRuleEngine;
 use harness_agent::guardrails::sandbox::SandboxBoundary;
-use harness_agent::guardrails::{GuardContext, GuardrailPipeline};
+use harness_agent::guardrails::{ApprovalLevel, GuardContext, GuardrailPipeline};
 use harness_agent::guardrails::audit::AuditLog;
 use harness_agent::llm::mock::MockLlmProvider;
 use harness_agent::r#loop::context::ContextBuilder;
@@ -65,6 +65,7 @@ async fn demo_guardrail_intercepts_dangerous_action() {
         ApprovalGate::new(Duration::from_millis(1)),
         sandbox,
         AuditLog::new(PathBuf::from("/dev/null")),
+        ApprovalLevel::default(),
     );
 
     // 2. Create Action::ToolCall for "bash" with params "rm -rf /"
@@ -230,6 +231,7 @@ async fn demo_feedback_loop_drives_correction() {
         // Turn 1: LLM writes buggy code
         LlmResponse {
             content: String::new(),
+            reasoning_content: None,
             finish_reason: FinishReason::ToolCalls,
             usage: TokenUsage {
                 prompt_tokens: 10,
@@ -249,6 +251,7 @@ async fn demo_feedback_loop_drives_correction() {
         // Turn 2: LLM sees feedback failure and fixes the bug
         LlmResponse {
             content: String::new(),
+            reasoning_content: None,
             finish_reason: FinishReason::ToolCalls,
             usage: TokenUsage {
                 prompt_tokens: 20,
@@ -268,6 +271,7 @@ async fn demo_feedback_loop_drives_correction() {
         // Turn 3: LLM gives final answer
         LlmResponse {
             content: "FINAL ANSWER: Fixed the null pointer bug by adding a null check. All tests pass.".to_string(),
+            reasoning_content: None,
             finish_reason: FinishReason::Stop,
             usage: TokenUsage {
                 prompt_tokens: 30,
@@ -333,6 +337,7 @@ async fn demo_feedback_loop_drives_correction() {
         ApprovalGate::new(Duration::from_millis(1)),
         sandbox,
         AuditLog::new(PathBuf::from("/dev/null")),
+        ApprovalLevel::default(),
     );
 
     let tempdir = TempDir::new().expect("tempdir");
@@ -359,6 +364,7 @@ async fn demo_feedback_loop_drives_correction() {
         config,
         context_builder,
         PathBuf::from("/tmp/demo-workspace"),
+        None,
     );
 
     // 4. Run agent loop
@@ -624,6 +630,7 @@ async fn demo_guardrail_pipeline_full_flow() {
         ApprovalGate::new(Duration::from_millis(1)),
         full_sandbox,
         AuditLog::new(PathBuf::from("/dev/null")),
+        ApprovalLevel::default(),
     );
 
     let curl_action = Action::ToolCall {

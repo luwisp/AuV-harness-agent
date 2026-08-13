@@ -129,7 +129,7 @@ impl SandboxBoundary {
             if !resolved.starts_with(&self.workspace_root) {
                 return Err(SandboxViolation::new(
                     format!(
-                        "File path '{}' (resolved to '{}') is outside workspace root '{}'",
+                        "文件路径 '{}'（解析为 '{}'）位于工作区根目录 '{}' 之外",
                         path,
                         resolved.display(),
                         self.workspace_root.display()
@@ -155,7 +155,7 @@ impl SandboxBoundary {
             if base == *forbidden {
                 return Err(SandboxViolation::new(
                     format!(
-                        "Command '{}' is forbidden (base: '{}')",
+                        "命令 '{}' 被禁止（基础命令: '{}'）",
                         command, base
                     ),
                     ViolationType::CommandForbidden,
@@ -168,7 +168,7 @@ impl SandboxBoundary {
             if !self.allowed_commands.iter().any(|a| *a == base) {
                 return Err(SandboxViolation::new(
                     format!(
-                        "Command '{}' is not in the allowed list (base: '{}')",
+                        "命令 '{}' 不在允许列表中（基础命令: '{}'）",
                         command, base
                     ),
                     ViolationType::CommandNotAllowed,
@@ -186,7 +186,7 @@ impl SandboxBoundary {
             if requested > self.max_timeout {
                 return Err(SandboxViolation::new(
                     format!(
-                        "Requested timeout {:?} exceeds maximum allowed {:?}",
+                        "请求的超时时间 {:?} 超过最大允许值 {:?}",
                         requested, self.max_timeout
                     ),
                     ViolationType::TimeoutExceeded,
@@ -201,7 +201,7 @@ impl SandboxBoundary {
         // Check for network-related tool calls (fetch, web_fetch, etc.)
         if is_network_tool_call(action) {
             return Err(SandboxViolation::new(
-                "Network access is disabled; network tool call blocked".to_string(),
+                "网络访问已禁用；网络工具调用被拦截".to_string(),
                 ViolationType::NetworkAccessBlocked,
             ));
         }
@@ -211,7 +211,7 @@ impl SandboxBoundary {
             if has_network_command(&cmd) {
                 return Err(SandboxViolation::new(
                     format!(
-                        "Network access is disabled; command '{}' makes network requests",
+                        "网络访问已禁用；命令 '{}' 会发起网络请求",
                         cmd
                     ),
                     ViolationType::NetworkAccessBlocked,
