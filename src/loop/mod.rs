@@ -230,11 +230,38 @@ impl AgentLoop {
 
             match guard_result {
                 GuardResult::Denied { reason, .. } => {
-                    let err = HarnessError::GuardrailBlocked(reason);
-                    self.emit(AgentEvent::Finished {
-                        result: Err(err.to_string()),
-                    });
-                    return Err(err);
+                    // 护栏拒绝（静态规则拦截 / 沙箱硬校验 / 审批拒绝）
+                    // 不作为致命错误终止整个循环：与工具执行失败一致，
+                    // 把拒绝原因作为 Tool 结果注入，让 LLM 看到后调整
+                    // 操作重试（例如把超时降到上限内）。若 LLM 反复尝试
+                    // 被拦操作，由 max_turns 兜底。非工具动作（如
+                    // final_answer 被静态规则拒绝）仍直接终止。
+                    match &action {
+                        Action::ToolCall { id, name, params } => {
+                            let err_msg = format!("被护栏拦截：{}", reason);
+                            self.emit(AgentEvent::ToolCallCompleted {
+                                name: name.clone(),
+                                detail: tool_call_detail(name, params),
+                                result_content: err_msg.clone(),
+                                success: false,
+                            });
+                            messages.push(Message {
+                                role: Role::Tool,
+                                content: err_msg,
+                                reasoning_content: None,
+                                tool_calls: None,
+                                tool_call_id: Some(id.clone()),
+                            });
+                            continue;
+                        }
+                        _ => {
+                            let err = HarnessError::GuardrailBlocked(reason);
+                            self.emit(AgentEvent::Finished {
+                                result: Err(err.to_string()),
+                            });
+                            return Err(err);
+                        }
+                    }
                 }
                 GuardResult::NeedsApproval { risk_level, reasons } => {
                     let err = HarnessError::GuardrailNeedsApproval(format!(
@@ -713,25 +740,29 @@ mod tests {
         };
         let pipeline = GuardrailPipeline::for_testing(rules, assessors, sandbox);
 
-        let mock = MockLlmProvider::new(vec![tool_call_response(
-            "call-1",
-            "bash",
-            r#"{"command": "dangerous operation"}"#,
-        )]);
+        let mock = MockLlmProvider::new(vec![
+            // Turn 1: Dangerous tool call — denied by L1 static rules.
+            // The denial is injected as a tool result so the LLM can adjust.
+            tool_call_response(
+                "call-1",
+                "bash",
+                r#"{"command": "dangerous operation"}"#,
+            ),
+            // Turn 2: LLM gives up on the dangerous approach and answers.
+            content_response("FINAL ANSWER: The dangerous operation was blocked, I will not retry."),
+        ]);
 
         let mut agent = build_test_loop(mock, pipeline, echo_registry(), empty_feedback());
 
         let result = agent.run("Do something dangerous").await;
-        assert!(result.is_err(), "expected guardrail block, got {:?}", result);
-        match result.unwrap_err() {
-            HarnessError::GuardrailBlocked(reason) => {
-                assert!(reason.contains("Dangerous tool blocked"));
-            }
-            other => panic!("expected GuardrailBlocked, got {:?}", other),
-        }
+        assert!(result.is_ok(), "expected recovery via final answer, got {:?}", result);
+        assert_eq!(
+            result.unwrap(),
+            "The dangerous operation was blocked, I will not retry."
+        );
 
-        // Should have 1 trace entry (the attempt was recorded before guardrail check)
-        assert_eq!(agent.turn_count(), 1);
+        // Both the attempt and the recovery turn are recorded
+        assert_eq!(agent.turn_count(), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -943,11 +974,17 @@ mod tests {
             ApprovalLevel::default(),
         );
 
-        let mock = MockLlmProvider::new(vec![tool_call_response(
-            "call-1",
-            "bash",
-            r#"{"command": "sensitive operation"}"#,
-        )]);
+        let mock = MockLlmProvider::new(vec![
+            // Turn 1: escalated command — approval times out (1ms gate),
+            // denial injected as tool result, LLM adjusts.
+            tool_call_response(
+                "call-1",
+                "bash",
+                r#"{"command": "sensitive operation"}"#,
+            ),
+            // Turn 2: final answer after the denial
+            content_response("FINAL ANSWER: Approval required, I will stop here."),
+        ]);
 
         let tempdir = TempDir::new().expect("tempdir");
         let memory = MemoryStore::new(tempdir.path().to_path_buf()).expect("memory store");
@@ -968,15 +1005,12 @@ mod tests {
         );
 
         let result = agent.run("Do something sensitive").await;
-        assert!(
-            result.is_err(),
-            "expected guardrail block for escalated action, got {:?}",
-            result
+        assert!(result.is_ok(), "expected recovery via final answer, got {:?}", result);
+        assert_eq!(
+            result.unwrap(),
+            "Approval required, I will stop here."
         );
-        match result.unwrap_err() {
-            HarnessError::GuardrailBlocked(_) => {}
-            other => panic!("expected GuardrailBlocked, got {:?}", other),
-        }
+        assert_eq!(agent.turn_count(), 2, "denial injected, LLM adjusted on turn 2");
     }
 
     // -----------------------------------------------------------------------

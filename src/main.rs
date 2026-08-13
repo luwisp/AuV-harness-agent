@@ -873,6 +873,29 @@ async fn run_repl(
                     }
                     Err(e) => {
                         eprintln!("\x1b[41;37;1m 错误 \x1b[0m {}\n", e);
+                        // run 失败（如 LLM 网络错误）也要保留本轮对话记录：
+                        // 用户任务 + 已收集的助手消息追加保存，避免会话
+                        // 历史静默丢失（历史 bug：护栏拦截后 agent 直接
+                        // 报错终止，整段对话没有留下任何会话文件）。
+                        // assistant 消息携带的 tool_calls 在本轮失败时没有
+                        // 对应工具结果，resume 会破坏 DeepSeek 严格配对，
+                        // 保存前清除。
+                        let mut partial: Vec<Message> = conversation.to_vec();
+                        partial.push(Message {
+                            role: Role::User,
+                            content: trimmed.to_string(),
+                            reasoning_content: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                        for mut m in round_messages.iter().cloned() {
+                            m.tool_calls = None;
+                            partial.push(m);
+                        }
+                        let save_name = current_title.as_deref().unwrap_or(AUTOSAVE_NAME);
+                        if let Err(se) = save_session(save_name, &partial) {
+                            eprintln!("\x1b[33m[警告]\x1b[0m 自动保存失败：{}", se);
+                        }
                     }
                 }
             }
