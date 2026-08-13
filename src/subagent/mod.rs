@@ -143,6 +143,11 @@ impl SubagentSpawner {
     pub fn active_count(&self) -> usize {
         self.active_count.load(Ordering::SeqCst)
     }
+
+    /// Return this spawner's nesting depth (root = 0).
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
 }
 
 // ============================================================================

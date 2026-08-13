@@ -3,6 +3,7 @@ pub mod context;
 pub mod file;
 pub mod git;
 pub mod search;
+pub mod subagent;
 pub mod test_runner;
 
 use crate::error::{HarnessError, Result};
