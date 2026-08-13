@@ -194,6 +194,14 @@ impl GuardrailPipeline {
         self.approval_level = level;
     }
 
+    /// 设置审批请求的上下文预览（透传到审批门）。
+    ///
+    /// 预览随审批块展示（stdin 打印路径）或随审批事件携带，用于
+    /// 子 agent 审批时让用户看到子对话的最近内容。
+    pub fn set_approval_preview(&mut self, preview: Option<String>) {
+        self.approval.set_preview(preview);
+    }
+
     /// Convenience constructor for tests: build a pipeline with default
     /// components and a zero approval timeout (so escalation always times out
     /// unless the caller overrides the gate).

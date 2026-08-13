@@ -62,6 +62,9 @@ pub struct ApprovalGate {
     /// 审批来源标签（如「子 agent」）：stdin 打印路径在标题与提示中
     /// 标注，用于区分父子审批块。
     context_label: Option<String>,
+    /// 审批上下文预览：随审批块展示的最近对话摘要（如子 agent 的
+    /// 最近消息），由 agent loop 在每次护栏检查前更新。
+    preview: Option<String>,
 }
 
 /// UI 事件模式的审批通道：审批请求以事件发给 UI 面板渲染，
@@ -80,6 +83,7 @@ impl ApprovalGate {
             session_whitelist: HashSet::new(),
             ui: None,
             context_label: None,
+            preview: None,
         }
     }
 
@@ -93,6 +97,7 @@ impl ApprovalGate {
             session_whitelist: HashSet::new(),
             ui: None,
             context_label: label.map(|s| s.to_string()),
+            preview: None,
         }
     }
 
@@ -115,7 +120,13 @@ impl ApprovalGate {
                 decision_rx,
             }),
             context_label: None,
+            preview: None,
         }
+    }
+
+    /// 更新审批上下文预览（最近对话摘要）。
+    pub fn set_preview(&mut self, preview: Option<String>) {
+        self.preview = preview;
     }
 
     /// Add a fingerprint to the session whitelist.
@@ -192,7 +203,12 @@ impl ApprovalGate {
         }
 
         // Step 3: print risk info to stderr
-        print_risk_info(action, assessment, self.context_label.as_deref());
+        print_risk_info(
+            action,
+            assessment,
+            self.context_label.as_deref(),
+            self.preview.as_deref(),
+        );
 
         // Step 4: wait for user input with timeout
         let decision = match input.await {
@@ -320,8 +336,14 @@ pub enum UserResponse {
 
 /// Print risk information about the action to stderr.
 ///
-/// `label` 标注审批来源（如「子 agent」），在标题与提示中展示。
-fn print_risk_info(action: &Action, assessment: &RiskAssessment, label: Option<&str>) {
+/// `label` 标注审批来源（如「子 agent」），在标题与提示中展示；
+/// `preview` 为审批上下文预览（最近对话摘要），在块尾追加展示。
+fn print_risk_info(
+    action: &Action,
+    assessment: &RiskAssessment,
+    label: Option<&str>,
+    preview: Option<&str>,
+) {
     let mut stderr = io::stderr().lock();
 
     // 保存光标位置（DECSC）：审批结束后整块清除，不留在对话流里
@@ -350,6 +372,13 @@ fn print_risk_info(action: &Action, assessment: &RiskAssessment, label: Option<&
 
     if let Some(ref mitigation) = assessment.suggested_mitigation {
         let _ = writeln!(stderr, "缓解措施: {mitigation}");
+    }
+
+    if let Some(preview) = preview {
+        let _ = writeln!(stderr, "上下文（最近消息）:");
+        for line in preview.lines() {
+            let _ = writeln!(stderr, "  {line}");
+        }
     }
 
     let _ = writeln!(stderr, "===================================");

@@ -231,6 +231,11 @@ impl AgentLoop {
                 user_id: None,
             };
 
+            // 审批上下文预览：随审批块展示最近对话（子 agent 审批时
+            // 用户借此查看子对话上下文）
+            self.guardrails
+                .set_approval_preview(approval_preview_text(&messages));
+
             let guard_result = self.guardrails.check(&action, &guard_ctx).await;
 
             match guard_result {
@@ -435,6 +440,37 @@ impl AgentLoop {
     pub fn turn_count(&self) -> usize {
         self.trace.len()
     }
+}
+
+/// 构建审批上下文预览：最近 5 条消息，每条截断 60 字符（约 300 字符）。
+///
+/// 供审批块/审批事件的「上下文（最近消息）」段使用——子 agent 审批时
+/// 用户借此查看子对话的最近内容。
+pub fn approval_preview_text(messages: &[Message]) -> Option<String> {
+    const MAX_LINES: usize = 5;
+    const MAX_CHARS: usize = 60;
+    if messages.is_empty() {
+        return None;
+    }
+    let preview = messages
+        .iter()
+        .rev()
+        .take(MAX_LINES)
+        .rev()
+        .map(|m| {
+            let role = match m.role {
+                Role::User => "用户",
+                Role::Assistant => "助手",
+                Role::Tool => "工具",
+                Role::System => "系统",
+            };
+            let text: String = m.content.chars().take(MAX_CHARS).collect();
+            let ellipsis = if m.content.chars().count() > MAX_CHARS { "…" } else { "" };
+            format!("[{role}] {text}{ellipsis}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(preview)
 }
 
 /// 从工具调用参数提取可读的命令/参数摘要：
@@ -1084,5 +1120,60 @@ mod tests {
         let detail = tool_call_detail("bash", &params);
         assert_eq!(detail.chars().count(), 121);
         assert!(detail.ends_with('…'));
+    }
+
+    // -----------------------------------------------------------------------
+    // approval_preview_text tests
+    // -----------------------------------------------------------------------
+
+    fn msg(role: Role, content: &str) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_approval_preview_text_empty_messages_returns_none() {
+        assert!(approval_preview_text(&[]).is_none(), "空消息列表应返回 None");
+    }
+
+    #[test]
+    fn test_approval_preview_text_formats_roles_in_order() {
+        let messages = vec![
+            msg(Role::User, "请计算 2+2"),
+            msg(Role::Assistant, "我需要使用计算器"),
+            msg(Role::Tool, "结果为 4"),
+        ];
+        let preview = approval_preview_text(&messages).expect("应有预览");
+        let expected = "[用户] 请计算 2+2\n[助手] 我需要使用计算器\n[工具] 结果为 4";
+        assert_eq!(preview, expected);
+    }
+
+    #[test]
+    fn test_approval_preview_text_truncates_long_content() {
+        let long = "长".repeat(100);
+        let messages = vec![msg(Role::System, &long)];
+        let preview = approval_preview_text(&messages).expect("应有预览");
+        assert_eq!(
+            preview,
+            format!("[系统] {}{}", "长".repeat(60), "…"),
+            "超长内容应截断到 60 字符并加省略号"
+        );
+    }
+
+    #[test]
+    fn test_approval_preview_text_limits_to_last_5() {
+        let messages: Vec<Message> = (0..7)
+            .map(|i| msg(Role::User, &format!("消息 {i}")))
+            .collect();
+        let preview = approval_preview_text(&messages).expect("应有预览");
+        let lines: Vec<&str> = preview.lines().collect();
+        assert_eq!(lines.len(), 5, "只保留最后 5 条");
+        assert_eq!(lines[0], "[用户] 消息 2");
+        assert_eq!(lines[4], "[用户] 消息 6");
     }
 }
