@@ -749,7 +749,7 @@ enum Commands {
 
 **关键实现**：GitHub CI 在每次 push/PR 执行 Rust 1.88 全目标检查、Clippy、全部测试与 doctest、release 构建/烟雾测试、Docker 构建/烟雾测试，并上传 Linux x86_64 GNU 二进制；Publish 流水线先验收测试，再向 GHCR 发布 `linux/amd64` 镜像，`v*` 标签同时创建带 SHA-256 的 GitHub Release；GitLab CI 提供课程指定的 `unit-test` job。
 
-**验证**：本地 448 项测试通过（370 lib + 71 bin + 3 mechanism demo + 4 doctest）；Rust 1.88 下 `cargo check` 与 Clippy 成功。仓库存在约 300 条既有 Clippy 风格建议，因此 Clippy 以建议模式运行，`cargo check`、测试、构建与容器烟雾测试为阻断门。
+**验证**：本地 449 项测试通过（371 lib + 71 bin + 3 mechanism demo + 4 doctest）；Rust 1.88 下 `cargo check` 与 Clippy 成功。GitHub Actions 实跑还发现并修复了 `CARGO_TERM_COLOR=always` 使反馈通道漏判编译错误的问题。仓库存在约 300 条既有 Clippy 风格建议，因此 Clippy 以建议模式运行，`cargo check`、测试、构建与容器烟雾测试为阻断门。
 
 **完成状态**：✓ 初版 commit `83eadc5`；完整 CI/CD 与分发收尾 commit `7079391`
 

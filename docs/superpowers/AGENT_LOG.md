@@ -305,20 +305,21 @@
 - 锁文件依赖最低需要 Rust 1.88，原 `rust:1.85-alpine` 无法构建；Alpine 静态 PIE 还需要 `openssl-libs-static`
 - `auv key set` 已写入钥匙串/加密文件，但 Agent 启动只读取配置与环境变量；接通安全存储读取，并增加容器用 `OPENAI_API_KEY_FILE`
 - 修正无桌面环境的钥匙串误判；加密回退文件强制 `0600`，SPEC 明确 machine-id 派生密钥的威胁边界
-- GitHub CI 增加 check、Clippy、448 项测试、release 产物与 Docker 烟雾测试；Publish 工作流在测试后推送 GHCR，并为 `v*` 标签创建带 SHA-256 的 Release；补齐课程要求的 `.gitlab-ci.yml` `unit-test` job
+- GitHub CI 增加 check、Clippy、449 项测试、release 产物与 Docker 烟雾测试；Publish 工作流在测试后推送 GHCR，并为 `v*` 标签创建带 SHA-256 的 Release；补齐课程要求的 `.gitlab-ci.yml` `unit-test` job
 - 首次 GitHub Actions 在 Rust 1.88 runner 上暴露 PTY 测试不稳定：`tcgetattr` 写入未清零的 `termios` 后，测试会比较未定义的 `c_cc` 保留槽；将生产路径与测试 helper 的接收缓冲区改为零初始化，并在 Rust 1.88/musl 中复现失败后验证修复
 - GitHub 未登录状态不公开完整 Actions 日志；为两条流水线加入保留原退出码的测试包装脚本，失败时提取 panic、FAILED、失败汇总与编译错误上下文写入 Checks annotation，使公开 API 可诊断具体失败测试
+- 第四轮 annotation 定位 `test_type_check_parses_errors`：workflow 的 `CARGO_TERM_COLOR=always` 传入测试内层 `cargo check`，ANSI 序列使错误正则失配，而通道又忽略非零退出码，形成假阳性；内层检查固定 `--color never`，并规定非零退出即失败且生成兜底诊断
 
 **人工干预**：用户提供 GitHub 仓库地址；PLAN 中“REPL 扩展不再标为计划外”和维护者账号改名由用户并行修改，本条记录保留这些修改。远端初始化提交仅含 GPLv3 `LICENSE`，用户确认将其原样纳入本地历史，并明确授权以 force push 替换远端初始化历史。
 
-**验证**：370 lib + 71 bin + 3 mechanism demo + 4 doctest 全部通过；Rust 1.88 `cargo check`/Clippy 成功；最终镜像构建和非 root 启动成功；Git 当前文件与全部历史未发现非占位符 key 模式。仓库仍有 2 条既有 `unused_mut` 编译警告和约 300 条 Clippy 风格建议，CI 采用 check 阻断、Clippy 建议模式。
+**验证**：371 lib + 71 bin + 3 mechanism demo + 4 doctest 全部通过；Rust 1.88 `cargo check`/Clippy 成功；最终镜像构建和非 root 启动成功；Git 当前文件与全部历史未发现非占位符 key 模式。仓库仍有 2 条既有 `unused_mut` 编译警告和约 300 条 Clippy 风格建议，CI 采用 check 阻断、Clippy 建议模式。
 
 ---
 
 ## 统计汇总
 
-- 提交总数：55（2026-07-08 至 2026-08-14，含本次 CI 失败摘要修订提交）
-- 测试数量：362 → 448（+86）；当前测试构建有 2 条既有 `unused_mut` 警告，Clippy 有约 300 条风格建议
+- 提交总数：56（2026-07-08 至 2026-08-14，含本次 type-check 假阳性修复提交）
+- 测试数量：362 → 449（+87）；当前测试构建有 2 条既有 `unused_mut` 警告，Clippy 有约 300 条风格建议
 - 用户报告 bug 数：5（审批提示同行/残留、审批超时三连、y 按不了、吞掉最终消息、滚动重复历史）——全部经根因定位修复并加回归测试
 - 关键方法论：mock 确定性测试（全部机制离线可测）+ pty 集成测试 + tmux E2E（HOME 隔离 + 假 LLM 服务器 127.0.0.1:18999）+ 真实会话审计日志定位
 

@@ -37,6 +37,8 @@ impl FeedbackChannel for TypeCheckChannel {
     async fn run(&self, context: &FeedbackContext) -> Result<FeedbackResult, HarnessError> {
         let output = Command::new("cargo")
             .arg("check")
+            .arg("--color")
+            .arg("never")
             .current_dir(&context.workspace_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -52,7 +54,7 @@ impl FeedbackChannel for TypeCheckChannel {
         // for completeness.
         let combined = format!("{}{}", stdout, stderr);
 
-        let errors: Vec<FeedbackError> = ERROR_RE
+        let mut errors: Vec<FeedbackError> = ERROR_RE
             .captures_iter(&combined)
             .map(|cap| FeedbackError {
                 file: Some(cap[2].to_string()),
@@ -63,7 +65,23 @@ impl FeedbackChannel for TypeCheckChannel {
             })
             .collect();
 
-        let passed = errors.is_empty();
+        if !output.status.success() && errors.is_empty() {
+            let message = combined
+                .lines()
+                .find(|line| line.trim_start().starts_with("error:"))
+                .map(str::trim)
+                .unwrap_or("cargo check failed without a structured diagnostic")
+                .to_string();
+            errors.push(FeedbackError {
+                file: None,
+                line: None,
+                column: None,
+                error_type: "cargo_check_failed".to_string(),
+                message,
+            });
+        }
+
+        let passed = output.status.success() && errors.is_empty();
 
         let summary = if passed {
             "Type check passed — no errors".to_string()
@@ -132,6 +150,10 @@ pub fn broken() -> u32 {
 }
 "#;
         let (_dir, workspace) = setup_rust_project("test_type_err", lib);
+        let cargo_dir = workspace.join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).expect("failed to create .cargo dir");
+        std::fs::write(cargo_dir.join("config.toml"), "[term]\ncolor = 'always'\n")
+            .expect("failed to write Cargo config");
         let ctx = FeedbackContext {
             workspace_root: workspace,
             changed_files: vec![PathBuf::from("src/lib.rs")],
@@ -157,6 +179,26 @@ pub fn broken() -> u32 {
             "expected a type-mismatch error, got: {}",
             error.message
         );
+    }
+
+    #[tokio::test]
+    async fn test_type_check_nonzero_without_numbered_diagnostic_fails() {
+        let lib = r#"compile_error!("plain compile failure");"#;
+        let (_dir, workspace) = setup_rust_project("test_plain_err", lib);
+        let ctx = FeedbackContext {
+            workspace_root: workspace,
+            changed_files: vec![PathBuf::from("src/lib.rs")],
+        };
+
+        let result = TypeCheckChannel
+            .run(&ctx)
+            .await
+            .expect("channel should not error");
+
+        assert!(!result.passed, "a non-zero cargo exit must fail the check");
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_type, "cargo_check_failed");
+        assert!(result.errors[0].message.contains("plain compile failure"));
     }
 
     #[tokio::test]

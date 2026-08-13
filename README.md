@@ -196,11 +196,11 @@ docker run --rm -it \
   auv-harness-agent
 ```
 
-也可以从 GHCR 获取公开镜像。`master` 随主分支更新，`latest` 随 `v*` Release 标签更新：
+也可以从 GHCR 获取公开镜像。`main` 随主分支更新，`latest` 随 `v*` Release 标签更新：
 
 ```bash
-docker pull ghcr.io/luwisp/auv-harness-agent:master
-docker run --rm ghcr.io/luwisp/auv-harness-agent:master --version
+docker pull ghcr.io/luwisp/auv-harness-agent:main
+docker run --rm ghcr.io/luwisp/auv-harness-agent:main --version
 ```
 
 容器中推荐用只读 secret file 提供 key。以下命令不会把 key 写进镜像、命令行或进程环境：
@@ -216,7 +216,7 @@ docker run --rm -it \
   --mount type=bind,src="$PWD",dst=/workspace \
   --mount type=bind,src="$HOME/.config/auv/openai-api-key",dst=/run/secrets/openai_api_key,readonly \
   -e OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
-  ghcr.io/luwisp/auv-harness-agent:master
+  ghcr.io/luwisp/auv-harness-agent:main
 ```
 
 访问宿主机 Ollama 时，Linux Docker 还需加 `--network host`；Docker Desktop 请把 `base_url` 中的 `localhost` 改为 `host.docker.internal`。
