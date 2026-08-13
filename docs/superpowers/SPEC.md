@@ -120,7 +120,7 @@ Action → [静态规则] → [风险评估] → [沙箱校验] → [审批状�
   - 全局 `~/.AuV/config.toml`：用户级默认值（默认模型、默认审批力度等）
   - 项目 `./.AuV/config.toml`：项目级覆盖（cwd 为 home 目录时跳过）
   - 启动自动创建（已存在则绝不改动，幂等）；`toml::Value` 字段级递归合并（项目覆盖全局）
-  - `--config <path>` 显式指定时只读单文件；项目根旧版 `config.toml` 不再加载，仅打印迁移提示
+  - `--config <path>` 显式指定时只读单文件；项目根旧版 `config.toml` 不再加载（无提示）
 - **角色说明文件**（`AuV.md`）：两级检测——项目 `./AuV.md` → `./CLAUDE.md` → `./AGENTS.md`，全局 `~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`，取第一个存在的文件；追加式叠加（默认提示词 + 全局 + 项目），配置内联 `[agent] system_prompt` 最高优先
 - **`[subagent]` 配置段**：`max_depth = 3`（递归深度上限，根为 0）、`max_total_agents = 10`（同时活跃子 agent 数上限）；缺省时取默认值
 

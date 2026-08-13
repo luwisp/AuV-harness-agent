@@ -274,8 +274,6 @@ pub struct LayeredPaths {
     pub global: PathBuf,
     /// 项目局部配置：`./.AuV/config.toml`（cwd 为 home 目录时为 None）
     pub local: Option<PathBuf>,
-    /// 旧版项目根 `./config.toml`（不再加载，仅用于迁移提示；cwd 为 home 时为 None）
-    pub legacy: Option<PathBuf>,
 }
 
 /// 解析分层配置路径（纯函数，home/cwd 参数注入便于测试）。
@@ -285,13 +283,11 @@ pub fn resolve_config_paths(home: &Path, cwd: &Path) -> LayeredPaths {
         LayeredPaths {
             global,
             local: None,
-            legacy: None,
         }
     } else {
         LayeredPaths {
             global,
             local: Some(cwd.join(".AuV").join("config.toml")),
-            legacy: Some(cwd.join("config.toml")),
         }
     }
 }
@@ -370,7 +366,7 @@ pub fn resolve_persona_files(home: &Path, cwd: &Path) -> (Option<PathBuf>, Optio
 /// 分层加载结果。
 pub struct LayeredLoad {
     pub config: HarnessConfig,
-    /// 用户可见的中文提示（创建/迁移提示等）。
+    /// 用户可见的中文提示（创建提示等）。
     pub notices: Vec<String>,
 }
 
@@ -378,7 +374,7 @@ pub struct LayeredLoad {
 ///
 /// - 配置文件不存在 → 创建目录并写入默认配置（已存在则绝不改动）
 /// - 局部配置字段级覆盖全局配置
-/// - 旧版项目根 `config.toml` 不再加载，仅提示迁移
+/// - 旧版项目根 `config.toml` 不再加载（无提示）
 pub fn load_layered(home: &Path, cwd: &Path) -> Result<LayeredLoad, crate::error::HarnessError> {
     let paths = resolve_config_paths(home, cwd);
     let mut notices: Vec<String> = Vec::new();
@@ -406,17 +402,7 @@ pub fn load_layered(home: &Path, cwd: &Path) -> Result<LayeredLoad, crate::error
         }
     }
 
-    // 3. 旧版配置迁移提示
-    if let Some(legacy) = &paths.legacy {
-        if legacy.exists() {
-            notices.push(format!(
-                "检测到旧版 {}，已不再加载；请将配置移至 ./.AuV/config.toml",
-                legacy.display()
-            ));
-        }
-    }
-
-    // 4. 合并结果反序列化并校验
+    // 3. 合并结果反序列化并校验
     let config: HarnessConfig = if merged.as_table().is_some_and(|t| t.is_empty()) {
         HarnessConfig::default()
     } else {
@@ -583,18 +569,13 @@ max_depth = 0
             paths.local,
             Some(PathBuf::from("/home/user/projects/demo/.AuV/config.toml"))
         );
-        assert_eq!(
-            paths.legacy,
-            Some(PathBuf::from("/home/user/projects/demo/config.toml"))
-        );
     }
 
     #[test]
-    fn test_resolve_config_paths_cwd_is_home_skips_local_and_legacy() {
+    fn test_resolve_config_paths_cwd_is_home_skips_local() {
         let paths = resolve_config_paths(Path::new("/home/user"), Path::new("/home/user"));
         assert_eq!(paths.global, PathBuf::from("/home/user/.AuV/config.toml"));
         assert!(paths.local.is_none());
-        assert!(paths.legacy.is_none());
     }
 
     #[test]
@@ -671,7 +652,7 @@ max_depth = 0
     }
 
     #[test]
-    fn test_load_layered_legacy_config_not_loaded_with_notice() {
+    fn test_load_layered_legacy_config_silently_ignored() {
         let home = tempdir();
         let cwd = tempdir();
         std::fs::write(cwd.path().join("config.toml"), "[llm]\nmodel = \"legacy-model\"\n")
@@ -679,8 +660,8 @@ max_depth = 0
         let load = load_layered(home.path(), cwd.path()).unwrap();
         assert_eq!(load.config.llm.model, "gpt-4o", "旧版 config.toml 不再加载");
         assert!(
-            load.notices.iter().any(|n| n.contains("旧版")),
-            "应有迁移提示：{:?}",
+            !load.notices.iter().any(|n| n.contains("旧版")),
+            "不应有迁移提示：{:?}",
             load.notices
         );
     }
