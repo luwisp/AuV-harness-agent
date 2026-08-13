@@ -367,13 +367,13 @@ fn risk_level_cn(level: &crate::guardrails::assessor::RiskLevel) -> &'static str
 
 /// Read a yes/no answer from stdin with a timeout.
 ///
-/// 可取消的轮询式读取：用 `poll(2)` 非阻塞检查 stdin 可读性，仅在
-/// 整行到达后才 `read(2)`（cooked 模式下 read 不会阻塞）。超时后
-/// 本函数直接返回，**不残留任何阻塞线程**。
+/// 可取消的轮询式读取：审批期间临时把 stdin 切换为非规范输入，使用
+/// `poll(2)` 检查可读性，再由 `read(2)` 读取。这样即使调用方留下了
+/// `ICRNL`/`ISIG` 关闭的混合终端模式，Enter 和 Ctrl+C 仍然有效。
+/// 终端属性通过 RAII 在所有返回路径完整恢复，不残留阻塞线程。
 ///
-/// 审批期间按 Ctrl+C 视为「拒绝」：cooked 模式（ISIG）下 Ctrl+C 的
-/// 默认动作是直接终止进程，REPL 会在审批中途整体退出（历史 bug）。
-/// 监听 `ctrl_c` 信号后进程存活，审批按拒绝处理并正常重绘界面。
+/// 审批期间按 Ctrl+C 视为「拒绝」：临时关闭 `ISIG` 后把 `0x03` 当作
+/// 输入字节处理，同时监听外部 SIGINT，二者都会拒绝而不终止 REPL。
 ///
 /// 历史 bug：旧实现 `spawn_blocking` + 阻塞 `read_line` 在超时后
 /// 无法取消——阻塞线程永久泄漏在 stdin read 上，与 rustyline
@@ -385,35 +385,43 @@ fn risk_level_cn(level: &crate::guardrails::assessor::RiskLevel) -> &'static str
 /// 内部的 stdin 分支承担）。
 #[doc(hidden)]
 pub async fn read_yes_no_with_timeout(timeout: Duration) -> UserResponse {
+    read_yes_no_from_fd_with_timeout(0, timeout).await
+}
+
+async fn read_yes_no_from_fd_with_timeout(
+    fd: libc::c_int,
+    timeout: Duration,
+) -> UserResponse {
+    let terminal_mode = ApprovalTerminalMode::enter(fd);
     let deadline = tokio::time::Instant::now() + timeout;
     let mut buf: Vec<u8> = Vec::new();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     loop {
-        // 超时、Ctrl+C、下一轮询周期三选一：Ctrl+C 分支返回「拒绝」
-        // 而不是让默认动作终止进程（审批期间终端是 cooked，ISIG 生效）
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => {
-                // 超时后清空 stdin 缓冲：用户可能在提示消失前补输了 y，
-                // 残留字节会被 rustyline 读成下一轮任务（历史 bug 症状）
-                drain_stdin();
+                discard_pending_input(fd, &terminal_mode);
                 return UserResponse::Timeout;
             }
             r = &mut ctrl_c => {
-                // Ctrl+C（或信号流异常）→ 拒绝；进程存活，界面正常重绘
                 let _ = r;
-                drain_stdin();
+                discard_pending_input(fd, &terminal_mode);
                 return UserResponse::No;
             }
             _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
-        match poll_stdin_readable() {
+        match poll_fd_readable(fd) {
             StdinState::Readable => {
                 let mut chunk = [0u8; 128];
                 let n = unsafe {
-                    libc::read(0, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                    libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
                 };
                 if n > 0 {
-                    buf.extend_from_slice(&chunk[..n as usize]);
+                    let bytes = &chunk[..n as usize];
+                    if bytes.contains(&b'\x03') {
+                        discard_pending_input(fd, &terminal_mode);
+                        return UserResponse::No;
+                    }
+                    buf.extend_from_slice(bytes);
                     if line_complete(&buf) {
                         break;
                     }
@@ -427,15 +435,73 @@ pub async fn read_yes_no_with_timeout(timeout: Duration) -> UserResponse {
             StdinState::NotReady => {}
         }
     }
-    // 审批输入读取完毕后清空 stdin 残留字节（粘贴多行等场景），
-    // 防止残留输入成为下一轮任务
-    drain_stdin();
+    discard_pending_input(fd, &terminal_mode);
     let text = String::from_utf8_lossy(&buf);
     let trimmed = text.trim().to_lowercase();
     if trimmed == "y" || trimmed == "yes" {
         UserResponse::Yes
     } else {
         UserResponse::No
+    }
+}
+
+/// 审批读取期间使用的终端模式。只接管输入语义，不改变输出处理和回显：
+/// - 关闭 `ICANON`，避免异常的 CR 无法提交规范行；
+/// - 开启 `ICRNL`，让 Enter 统一成为 `\n`；
+/// - 关闭 `ISIG`，让 Ctrl+C 作为可识别的 `0x03` 字节到达读取器。
+struct ApprovalTerminalMode {
+    fd: libc::c_int,
+    original: Option<libc::termios>,
+}
+
+impl ApprovalTerminalMode {
+    fn enter(fd: libc::c_int) -> Self {
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Self { fd, original: None };
+        }
+
+        let original = unsafe { original.assume_init() };
+        let mut approval = original;
+        approval.c_lflag &= !(libc::ICANON | libc::ISIG);
+        approval.c_iflag &= !(libc::IGNCR | libc::INLCR);
+        approval.c_iflag |= libc::ICRNL;
+        approval.c_cc[libc::VMIN] = 1;
+        approval.c_cc[libc::VTIME] = 0;
+
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &approval) } != 0 {
+            return Self { fd, original: None };
+        }
+
+        Self {
+            fd,
+            original: Some(original),
+        }
+    }
+
+    fn controls_terminal(&self) -> bool {
+        self.original.is_some()
+    }
+}
+
+impl Drop for ApprovalTerminalMode {
+    fn drop(&mut self) {
+        if let Some(original) = self.original.as_ref() {
+            unsafe {
+                libc::tcflush(self.fd, libc::TCIFLUSH);
+                libc::tcsetattr(self.fd, libc::TCSANOW, original);
+            }
+        }
+    }
+}
+
+fn discard_pending_input(fd: libc::c_int, mode: &ApprovalTerminalMode) {
+    if mode.controls_terminal() {
+        unsafe {
+            libc::tcflush(fd, libc::TCIFLUSH);
+        }
+    } else {
+        drain_fd(fd);
     }
 }
 
@@ -459,9 +525,9 @@ enum StdinState {
 }
 
 /// 非阻塞检查 stdin（fd 0）是否可读。
-fn poll_stdin_readable() -> StdinState {
+fn poll_fd_readable(fd: libc::c_int) -> StdinState {
     let mut pfd = libc::pollfd {
-        fd: 0,
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
@@ -486,12 +552,16 @@ fn poll_stdin_readable() -> StdinState {
 /// 整行；未回车的半行由内核行缓冲保留，属正常输入流程。
 #[doc(hidden)]
 pub fn drain_stdin() {
+    drain_fd(0);
+}
+
+fn drain_fd(fd: libc::c_int) {
     loop {
-        match poll_stdin_readable() {
+        match poll_fd_readable(fd) {
             StdinState::Readable => {
                 let mut chunk = [0u8; 128];
                 let n = unsafe {
-                    libc::read(0, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                    libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
                 };
                 if n <= 0 {
                     break;
@@ -510,6 +580,99 @@ pub fn drain_stdin() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    struct TestPty {
+        master: libc::c_int,
+        slave: libc::c_int,
+    }
+
+    #[cfg(unix)]
+    impl TestPty {
+        fn with_hybrid_input_mode() -> Self {
+            let mut master = -1;
+            let mut slave = -1;
+            let result = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            assert_eq!(result, 0, "openpty failed: {}", io::Error::last_os_error());
+
+            let mut mode = terminal_mode(slave);
+            mode.c_lflag |= libc::ICANON | libc::ECHO;
+            mode.c_lflag &= !libc::ISIG;
+            mode.c_iflag &= !libc::ICRNL;
+            let result = unsafe { libc::tcsetattr(slave, libc::TCSANOW, &mode) };
+            assert_eq!(
+                result,
+                0,
+                "tcsetattr failed: {}",
+                io::Error::last_os_error()
+            );
+
+            Self { master, slave }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestPty {
+        fn drop(&mut self) {
+            unsafe {
+                libc::close(self.master);
+                libc::close(self.slave);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn terminal_mode(fd: libc::c_int) -> libc::termios {
+        let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let result = unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) };
+        assert_eq!(
+            result,
+            0,
+            "tcgetattr failed: {}",
+            io::Error::last_os_error()
+        );
+        unsafe { mode.assume_init() }
+    }
+
+    #[cfg(unix)]
+    fn assert_terminal_mode_eq(expected: &libc::termios, actual: &libc::termios) {
+        assert_eq!(actual.c_iflag, expected.c_iflag, "input flags changed");
+        assert_eq!(actual.c_oflag, expected.c_oflag, "output flags changed");
+        assert_eq!(actual.c_cflag, expected.c_cflag, "control flags changed");
+        assert_eq!(actual.c_lflag, expected.c_lflag, "local flags changed");
+        assert_eq!(actual.c_cc, expected.c_cc, "control characters changed");
+        assert_eq!(
+            unsafe { libc::cfgetispeed(actual) },
+            unsafe { libc::cfgetispeed(expected) },
+            "input speed changed"
+        );
+        assert_eq!(
+            unsafe { libc::cfgetospeed(actual) },
+            unsafe { libc::cfgetospeed(expected) },
+            "output speed changed"
+        );
+    }
+
+    #[cfg(unix)]
+    async fn write_pty_after(master: libc::c_int, bytes: &'static [u8]) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let written = unsafe {
+            libc::write(
+                master,
+                bytes.as_ptr() as *const libc::c_void,
+                bytes.len(),
+            )
+        };
+        assert_eq!(written, bytes.len() as isize);
+    }
 
     // -----------------------------------------------------------------------
     // Test helpers
@@ -608,6 +771,65 @@ mod tests {
         // 行未完成
         assert!(!line_complete(b"y"));
         assert!(!line_complete(b""));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hybrid_terminal_accepts_y_carriage_return_and_restores_mode() {
+        let pty = TestPty::with_hybrid_input_mode();
+        let original = terminal_mode(pty.slave);
+        let writer = tokio::spawn(write_pty_after(pty.master, b"y\r"));
+
+        let response =
+            read_yes_no_from_fd_with_timeout(pty.slave, Duration::from_secs(1)).await;
+
+        writer.await.unwrap();
+        assert_eq!(response, UserResponse::Yes);
+        assert_terminal_mode_eq(&original, &terminal_mode(pty.slave));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hybrid_terminal_treats_ctrl_c_byte_as_no_and_restores_mode() {
+        let pty = TestPty::with_hybrid_input_mode();
+        let original = terminal_mode(pty.slave);
+        let writer = tokio::spawn(write_pty_after(pty.master, b"\x03"));
+
+        let response =
+            read_yes_no_from_fd_with_timeout(pty.slave, Duration::from_secs(1)).await;
+
+        writer.await.unwrap();
+        assert_eq!(response, UserResponse::No);
+        assert_terminal_mode_eq(&original, &terminal_mode(pty.slave));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_hybrid_terminal_timeout_discards_partial_input_and_restores_mode() {
+        let pty = TestPty::with_hybrid_input_mode();
+        let original = terminal_mode(pty.slave);
+        let writer = tokio::spawn(write_pty_after(pty.master, b"y"));
+
+        let response =
+            read_yes_no_from_fd_with_timeout(pty.slave, Duration::from_millis(150)).await;
+
+        writer.await.unwrap();
+        assert_eq!(response, UserResponse::Timeout);
+        assert_terminal_mode_eq(&original, &terminal_mode(pty.slave));
+
+        let mut inspect_mode = original;
+        inspect_mode.c_lflag &= !libc::ICANON;
+        inspect_mode.c_cc[libc::VMIN] = 1;
+        inspect_mode.c_cc[libc::VTIME] = 0;
+        assert_eq!(
+            unsafe { libc::tcsetattr(pty.slave, libc::TCSANOW, &inspect_mode) },
+            0
+        );
+        assert!(matches!(poll_fd_readable(pty.slave), StdinState::NotReady));
+        assert_eq!(
+            unsafe { libc::tcsetattr(pty.slave, libc::TCSANOW, &original) },
+            0
+        );
     }
 
     #[tokio::test]
