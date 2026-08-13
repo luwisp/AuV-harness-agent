@@ -43,7 +43,7 @@ jobs:
           toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Run all targets
-        run: cargo test --all-targets --locked --verbose -- --test-threads=1
+        run: bash .github/scripts/run-cargo-test.sh cargo test --all-targets --locked --verbose -- --test-threads=1
       - name: Run documentation tests
         run: cargo test --doc --locked
 
