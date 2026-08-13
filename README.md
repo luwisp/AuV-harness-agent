@@ -1,154 +1,30 @@
 # AuV harness agent — Coding Agent Harness
 
-> 将 LLM 封装成一台能稳定、可靠执行软件工程任务的完整系统。核心理念：**Agent = LLM + Harness**。
+AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent Harness）：主循环、工具分发、四层治理护栏、反馈闭环、记忆与子 agent 委派均为自研 harness 内核，不依赖任何现成 agent 框架。全部核心机制由 mock LLM 驱动、可离线确定性测试（当前 478 项测试全通过、零编译警告），并配有一键复现的机制演示。支持交互式 REPL、可视化 TUI、纯文本三种运行方式。
+
+**核心机制速览**
+
+| 机制 | 说明 |
+|------|------|
+| 四层护栏 | 静态规则 → 风险评估 → 人工审批 → 沙箱边界，危险操作在工具执行前被拦截，全部决策写入审计日志 |
+| 反馈闭环 | 工具产出经测试/静态检查校验，失败结果注入下一轮上下文，驱动 agent 自我修正 |
+| 子 agent 委派 | `subagent` 工具把任务委派给独立上下文的子 agent，深度传播限制递归，审批路由回父界面 |
+| 规则与技能 | `rules.md` 声明式规则注入 system prompt；`.skills/` 技能按需加载 |
+| 记忆 | 文件级持久记忆，多轮对话保持上下文 |
+| 凭据安全 | OS 钥匙串 / AES-256-GCM 加密文件 / secret file 三种存储，密钥绝不明文落盘 |
 
 ## 目录
 
-- [三种运行模式](#三种运行模式)
 - [快速开始](#快速开始)
-- [1. 安装与初始化](#1-安装与初始化)
-- [2. 配置 API](#2-配置-api)
-- [3. 运行 Agent](#3-运行-agent)
-- [4. 配置文件](#4-配置文件)
-- [5. 规则与技能](#5-规则与技能)
-- [6. 护栏系统](#6-护栏系统)
-- [7. 目录结构](#7-目录结构)
-- [8. 开发与测试](#8-开发与测试)
-- [9. CI/CD 与发布](#9-cicd-与发布)
+- [课程交付物对应位置](#课程交付物对应位置)
+- [三种运行模式](#三种运行模式)
+- [配置](#配置)
+- [核心机制](#核心机制)
+- [机制演示](#机制演示)
+- [目录结构](#目录结构)
+- [开发与测试](#开发与测试)
+- [CI/CD 与发布](#cicd-与发布)
 - [已知限制](#已知限制)
-
----
-
-## 三种运行模式
-
-`auv` 有三种截然不同的交互方式，按场景选择：
-
-| 模式 | 命令 | 适用场景 |
-|------|------|---------|
-| **交互式 REPL** | `auv` | 日常使用，多轮对话，持续编码 |
-| **TUI 模式** | `auv run "任务"` | 单次任务，需要可视化面板 |
-| **纯文本模式** | `auv run --no-tui "任务"` | CI/脚本/管道，不需终端 |
-
-### 模式 1：交互式 REPL（推荐日常使用）
-
-```bash
-auv
-```
-
-不带任何参数直接启动，进入类似 Claude Code 的交互式对话循环。**默认开启新会话**；需要接着上次的对话时用 `auv --resume` 启动（恢复自动保存的会话）。
-
-```
-AuV harness agent REPL v0.1.0
-输入任务开始对话，/help 查看命令，/exit 退出
-（暂无对话历史）
-────────────────────────────────────────────────
-模型: gpt-4o | Token: 0 | 上下文剩余: 100%（128000/128000）
-> 帮我把 src/main.rs 里的 println! 换成 tracing::info!
-[1]  用户 › 帮我把 src/main.rs 里的 println! 换成 tracing::info!
-[2]  助手 › 我来帮你把 println! 替换为 tracing 宏...
-         （工具调用：read_file: {"path":"src/main.rs"}）
-[3]  工具 › read_file: use tracing::{info, warn, error};
-[4]  助手 › 已将 3 处 println! 替换为 tracing::info!
-
-────────────────────────────────────────────────
-模型: gpt-4o | Token: 1,234 | 上下文剩余: 99%（126,766/128,000）
-> /view 5
-[5]  工具 › 完整内容……（不限行数、不限字符）
-```
-
-实时消息与历史使用完全相同的消息块：所有消息（含实时新消息）都带灰色序号 `[n]`，assistant 的「工具调用：」标注直接附上具体命令（如 `（工具调用：bash: uname -a）`），`/cls` 重绘后同样可见。**工具结果行同样紧跟工具名直接显示具体命令**（如 `[3] 工具 bash: uname -a`，跳过 `Success: true` 包装行），实时输出、历史回显、`/view` 查看三处一致。
-
-**彩色输出：** 角色标签为彩色背景块——用户蓝底白字、助手绿底白字、工具紫底白字、系统灰底白字；消息序号 `[n]`、工具调用标注（`（工具调用：…）`）、分隔线等辅助信息为灰色，失败内容红色显示。标签采用 24 位真彩色（如 `48;2;37;99;235`），不依赖终端浅色/深色主题，任何背景下均清晰可读。历史展示与实时输出使用完全相同的消息块风格。
-
-**完整历史：** `auv --resume` 启动与 `/resume` 命令恢复会话后**完整打印全部历史**（用户/助手消息不截断，工具结果限 12 行、超出标注省略），靠终端滚动条回看——对标 Claude Code 转录模式与 Codex resume。`/history` 显示全部消息（`/history 5` 只看最近 5 条）；`/view <编号>` 查看单条消息全文。
-
-**REPL 输入体验（rustyline）：**
-
-- 输入行上方常驻**状态行**：`模型: gpt-4o | Token: 1,234 | 上下文剩余: 99%（126,766/128,000）`，模型与上下文窗口按当前配置显示，Token 为全会话累计值（每轮结束后刷新）
-- `↑` / `↓`：浏览输入历史（跨会话持久化到 `.AuV/repl_history.txt`）
-- `←` / `→`：行内移动光标编辑
-- `Ctrl+A` / `Ctrl+E`：跳到行首 / 行尾
-- `Ctrl+C`：退出 REPL
-- `Ctrl+D`：退出 REPL（EOF）
-
-**REPL 内部命令：**
-
-| 输入 | 功能 |
-|------|------|
-| 任意文本 | 作为任务发送给 agent（以用户消息块进入对话流） |
-| `/help` | 显示帮助 |
-| `/history` | 显示全部对话消息（`/history 5` 只看最近 5 条） |
-| `/view <编号>` | 查看单条消息全文（编号见消息前的 `[n]`） |
-| `/cls` | 清屏重绘，清理 `/view`、`/help` 等命令输出（等同重新进入会话） |
-| `/clear` | 重置对话历史（同时删除当前会话的自动保存文件） |
-| `/save <名称>` | 保存当前会话为命名快照 |
-| `/resume` | 恢复会话（不带参数时列出所有会话交互选择，可直接回车或输入 `q` 取消返回原对话） |
-| `/resume <名称>` | 恢复指定会话 |
-| `/sessions` | 列出所有已保存的会话（当前会话带 `（当前会话）` 标记） |
-| `/rename <标题>` | 更改当前会话标题（同步重命名自动保存文件） |
-| `/model` | 查看当前模型信息（模型、API 端点、上下文窗口、累计 Token） |
-| `/model <名称>` | 切换模型（运行时生效，下轮任务起使用新模型，失败自动回滚） |
-| `/approval` | 查看当前审批力度与四档说明 |
-| `/approval <无\|低\|中\|高>` | 调整审批力度（运行时生效，下轮任务起按新档位审批） |
-| `/skills` | 查看可用技能列表（`.skills` 目录下的技能文件与描述） |
-| `/exit` 或 `/quit` | 退出 |
-| `Ctrl+C` / `Ctrl+D` | 退出 |
-
-**REPL 特性：**
-
-- **自动保存（模型起名）**：发送第一条任务、本轮运行结束后，由模型根据任务内容生成简短标题（不超过 12 字），会话自动保存到 `.AuV/sessions/<标题>.json`；标题生成失败时回退到 `autosave.json`。后续每轮对话自动按当前标题续存。默认启动开启新会话，`auv --resume` 启动时恢复最近修改的会话，无需手动 `/save`。
-- **界面重绘**：启动、`/resume`、`/clear` 后自动清屏并重绘界面；清屏同时清空终端滚动缓冲区（`\x1b[3J`），向上滚动不会再看到重复的历史记录；`/resume` 交互选择完成后清理选择列表，不留过期信息。
-- **用户消息块**：发送任务后输入行原位替换为彩色用户消息块，任务以对话消息形式留在屏幕与历史中。
-- **完整历史**：恢复会话时完整打印全部消息（带灰色序号 `[n]`），工具结果限 12 行并标注 `/view` 提示；`/history` 显示全部，`/view <编号>` 查看单条消息全文。
-- **审批提示清除**：护栏审批由 REPL 自身渲染（事件模式，与 TUI 同机制）——审批块独立成行打印（助手消息不再与 `(y/n):` 提示同行），y/n 确认或超时后**全屏重绘**整块从屏幕清除，对话流不被审批信息打断，已打印的助手消息经重绘保留。
-- **交互式 /resume**：不带参数时列出所有会话，按编号或名称选择恢复；空输入或 `q` 取消返回原对话，无效编号提示后重新选择。
-- **对话记忆**：会话历史在多轮对话中保持（按时间顺序），agent 记得之前做过的事。
-- **实时进度**：agent 执行过程中 assistant 消息块实时显示（「工具调用：」标注直接附具体命令，如 `（工具调用：bash: uname -a）`），随后工具结果显示首行；全部实时消息带序号，与历史编号一致。
-- **中文界面**：所有系统提示均为中文，护栏审批信息同样本地化（`=== 需要护栏审批 ===`、风险等级、原因、缓解措施）。
-
-### 模式 2：TUI 模式（可视化面板）
-
-```bash
-auv run "你的任务"
-```
-
-在终端中启动时，默认进入 TUI 模式（除非加了 `--no-tui` 或 stdout 不是终端）。**Agent 运行完毕后 TUI 保持打开**，你可查看完整的工具调用记录和对话历史，按 `q` 退出：
-
-```
-┌──────────────────────────────┬───────────────────────┐
-│                              │      工具面板           │
-│      对话面板 (70%)           │  bash: uname -a        │
-│  User: 任务描述               ├───────────────────────┤
-│  Assistant: 工具调用...       │      护栏面板          │
-│  Tool: 执行结果               │ 按 y 批准 / n 拒绝，   │
-│                              │ Esc 或 q 退出          │
-├──────────────────────────────┴───────────────────────┤
-│ 轮次: 3 | Token: 1234 | 风险: 低 | 模型: gpt-4o | 运行中 │
-└──────────────────────────────────────────────────────┘
-```
-
-**面板说明：** 状态栏为底部单行（白字深灰底），显示轮次、Token、风险等级、**模型（当前配置的真实模型）**与运行状态；有待审批请求时追加 `待审批: N（按 y 批准 / n 拒绝）`。护栏面板的 y/n 操作提示固定在面板顶部（黄底黑字加粗），审批请求多时也不会被裁掉；风险等级显示为中文（低/中/高/严重）。工具面板展示具体调用命令（如 `bash: uname -a`）。**所有面板颜色均为 24 位真彩色**（不依赖终端浅色/深色主题，浅色终端下同样清晰可读）。
-
-**TUI 快捷键：**
-
-| 按键 | 功能 |
-|------|------|
-| `q` / `Esc` / `Ctrl+C` | 退出 |
-| `y` | 批准护栏请求（决定实时传回护栏管线，危险操作继续执行） |
-| `n` | 拒绝护栏请求（决定实时传回护栏管线，操作被拦截） |
-| `Enter` | 确认 |
-| `Tab` | 切换面板焦点 |
-
-### 模式 3：纯文本模式（脚本/CI/管道）
-
-```bash
-auv run --no-tui "运行 cargo test 并修复失败的测试"
-```
-
-纯文本输出，不依赖终端能力。适合：
-- CI/CD 流水线
-- 脚本自动化
-- 管道重定向（`auv run "task" > output.txt`）
 
 ---
 
@@ -156,8 +32,8 @@ auv run --no-tui "运行 cargo test 并修复失败的测试"
 
 ### 前置条件
 
-- Rust 1.88+ (edition 2024；当前锁文件中的依赖要求至少 1.88)
-- OpenAI API Key，或任何兼容 OpenAI 接口的服务（DeepSeek、Groq、Ollama、vLLM 等）
+- Rust 1.88+（edition 2024；当前锁文件中的依赖要求至少 1.88）
+- 一个 OpenAI 兼容 API 的 key（OpenAI、DeepSeek、Groq、Ollama、vLLM 等均可）
 
 ### 三步启动
 
@@ -165,18 +41,22 @@ auv run --no-tui "运行 cargo test 并修复失败的测试"
 # 1. 编译
 cargo build --release
 
-# 2. 初始化（首次运行，创建配置 + 录入 key）
+# 2. 初始化（首次运行：创建配置 + 引导录入 key，隐藏回显）
 ./target/release/auv init
 
-# 3. 开始使用
+# 3. 开始使用（进入交互式 REPL）
 ./target/release/auv
 ```
 
----
+单次任务也可以直接一句话：
 
-## 1. 安装与初始化
+```bash
+./target/release/auv run "运行 cargo test 并修复失败的测试"
+```
 
-### 从源码构建
+### 获取方式（三选一）
+
+**从源码构建**
 
 ```bash
 git clone git@github.com:luwisp/AuV-harness-agent.git
@@ -185,9 +65,7 @@ cargo build --release --locked
 ./target/release/auv --help
 ```
 
-### Docker
-
-本地构建并启动：
+**Docker**（本地构建或 GHCR 公开镜像；`main` 随主分支更新，`latest` 随 `v*` Release 标签更新）：
 
 ```bash
 docker build -t auv-harness-agent .
@@ -196,70 +74,118 @@ docker run --rm -it \
   auv-harness-agent
 ```
 
-也可以从 GHCR 获取公开镜像。`main` 随主分支更新，`latest` 随 `v*` Release 标签更新：
+容器中推荐用只读 secret file 提供 key（不把 key 写进镜像、命令行或进程环境）：
 
 ```bash
-docker pull ghcr.io/luwisp/auv-harness-agent:main
-docker run --rm ghcr.io/luwisp/auv-harness-agent:main --version
-```
-
-容器中推荐用只读 secret file 提供 key。以下命令不会把 key 写进镜像、命令行或进程环境：
-
-```bash
-mkdir -p "$HOME/.config/auv"
-chmod 700 "$HOME/.config/auv"
-touch "$HOME/.config/auv/openai-api-key"
-chmod 600 "$HOME/.config/auv/openai-api-key"
+mkdir -p "$HOME/.config/auv" && chmod 700 "$HOME/.config/auv"
+touch "$HOME/.config/auv/openai-api-key" && chmod 600 "$HOME/.config/auv/openai-api-key"
 # 用编辑器把 key 写入上面的文件，不要在命令行中直接写 key。
 
 docker run --rm -it \
   --mount type=bind,src="$PWD",dst=/workspace \
   --mount type=bind,src="$HOME/.config/auv/openai-api-key",dst=/run/secrets/openai_api_key,readonly \
   -e OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
-  ghcr.io/luwisp/auv-harness-agent:main
+  auv-harness-agent
 ```
 
 访问宿主机 Ollama 时，Linux Docker 还需加 `--network host`；Docker Desktop 请把 `base_url` 中的 `localhost` 改为 `host.docker.internal`。
 
-### GitHub Release 二进制
-
-推送 `v*` 标签后，发布流水线会在 [GitHub Releases](https://github.com/luwisp/AuV-harness-agent/releases) 生成 Linux x86_64 GNU 二进制及 SHA-256 校验文件。该二进制未做代码签名；下载后先核对校验和，再赋予执行权限：
+**GitHub Release 二进制**：推送 `v*` 标签后，发布流水线会在 [GitHub Releases](https://github.com/luwisp/AuV-harness-agent/releases) 生成 Linux x86_64 GNU 二进制及 SHA-256 校验文件（未做代码签名）：
 
 ```bash
 sha256sum -c auv-v*-SHA256SUMS
 chmod +x auv-v*-x86_64-unknown-linux-gnu
 ```
 
-### 初始化
+---
 
-```bash
-auv init
-```
+## 课程交付物对应位置
 
-交互式引导会：
-1. 创建 `./.AuV/config.toml` — 项目局部配置（当前目录为 home 时创建全局配置）
-2. 创建 `.AuV/memory/` — 记忆存储目录
-3. 引导你输入 API Key（隐藏回显）
+AI4SE 期末项目提交清单（课程通用要求 §五 + A 类项目额外要求）与本仓库文件的对应关系：
 
-### 两级配置
+| 交付物 | 仓库位置 |
+|--------|---------|
+| 1. `SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md` | `docs/SPEC.md`、`docs/PLAN.md`、`docs/SPEC_PROCESS.md` |
+| 2. 完整源代码（自研 harness 内核 + mock-LLM 单测） | `src/`（内核）、`tests/`（集成测试）、`src/llm/mock.rs`（mock LLM） |
+| 3. 分发产物与说明 | `Dockerfile`；获取、运行、key 安全配置、已知限制见本 README |
+| 4. `README.md` | `README.md`（本文件） |
+| 5. `AGENT_LOG.md` | `docs/AGENT_LOG.md` |
+| 6. CI 配置（含 `unit-test` job） | `.gitlab-ci.yml`（另有 `.github/workflows/ci.yml`） |
+| 7. CI/CD 执行记录（最后一次须为 pass） | GitHub Actions：https://github.com/luwisp/AuV-harness-agent/actions |
+| 8. `REFLECTION.md`（1500–2500 字反思报告） | `docs/REFLECTION.md` |
+| 9. 线上部署 URL（WebUI 接口） | 不适用：本项目为 CLI/TUI 形态，SPEC 决策已移除 Web 仪表盘 |
+| 机制演示（A 类项目额外要求 §A.6） | `tests/mechanism_demo.rs`（四项，运行方式见[机制演示](#机制演示)） |
 
-AuV 使用「全局 + 项目」两级配置，**启动时自动创建，已存在则绝不改动**：
-
-| 层级 | 路径 | 作用 |
-|------|------|------|
-| 全局 | `~/.AuV/config.toml` | 用户级默认值（默认模型、默认审批力度等） |
-| 项目 | `./.AuV/config.toml` | 项目级覆盖（当前目录为 home 时跳过） |
-
-- **字段级合并**：项目配置写了哪个字段就覆盖哪个，未写的继承全局
-- **显式指定**：`auv run -c <路径> "任务"` 只读指定文件，不走分层
-- **旧版兼容**：项目根旧版 `config.toml` 不再加载（无提示）
-- **角色说明**：`AuV.md` 用于加载角色说明——项目内按 `AuV.md` → `CLAUDE.md` → `AGENTS.md` 取第一个存在的文件（已有这些文件的项目无需改名）；全局对应 `~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`。两级叠加到默认提示词之后，配置内联 `[agent] system_prompt` 优先级最高
+课程项目要求原文（通用要求 + A 类项目说明）位于 `doc/` 目录。
 
 ---
 
-## 2. 配置 API
+## 三种运行模式
 
-### 密钥管理
+| 模式 | 命令 | 适用场景 |
+|------|------|---------|
+| 交互式 REPL | `auv` | 日常使用，多轮对话，持续编码 |
+| TUI 可视化面板 | `auv run "任务"` | 单次任务，可视化查看工具调用与审批 |
+| 纯文本 | `auv run --no-tui "任务"` | CI/脚本/管道，不需终端能力 |
+
+### 模式 1：交互式 REPL（推荐日常使用）
+
+```bash
+auv              # 默认开启新会话
+auv --resume     # 恢复最近自动保存的会话（完整打印历史）
+```
+
+进入类似 Claude Code 的交互式对话循环，输入任务即开始；输入行上方常驻状态行（模型 / Token / 上下文剩余）。**常用命令：**
+
+| 输入 | 功能 |
+|------|------|
+| `/help` | 显示帮助 |
+| `/history [N]` | 显示全部对话消息（带 N 只看最近 N 条） |
+| `/view <编号>` | 查看单条消息全文（编号见消息前的 `[n]`） |
+| `/cls` | 清屏重绘 |
+| `/clear` | 重置对话历史 |
+| `/save <名称>` / `/resume [名称]` / `/sessions` | 会话快照保存 / 恢复 / 列表 |
+| `/rename <标题>` | 更改当前会话标题 |
+| `/model [名称]` | 查看 / 切换模型（运行时生效） |
+| `/approval [无\|低\|中\|高]` | 查看 / 调整审批力度（运行时生效） |
+| `/skills` | 查看可用技能列表 |
+| `/exit` / `Ctrl+C` / `Ctrl+D` | 退出 |
+
+主要特性：
+
+- **自动保存**：首轮任务结束后由模型生成标题（不超过 12 字），会话自动保存到 `.AuV/sessions/`；后续每轮自动续存
+- **对话记忆**：多轮对话保持完整历史，agent 记得之前做过的事
+- **实时进度**：assistant 消息实时显示，工具调用标注直接附具体命令（如 `（工具调用：bash: uname -a）`）；全部消息带序号，与历史一致
+- **审批**：护栏审批由 REPL 自身渲染（中文审批块：风险等级 / 原因 / 缓解措施），y/n 确认或超时后整块清除，对话流不被打断
+- **中文界面**：所有系统提示与护栏信息均为中文
+- 编辑体验：`↑`/`↓` 浏览历史输入（持久化到 `.AuV/repl_history.txt`），`←`/`→` 移动光标，`Ctrl+A`/`Ctrl+E` 跳行首/行尾
+
+### 模式 2：TUI 可视化面板
+
+```bash
+auv run "你的任务"
+```
+
+终端中默认进入 TUI（除非加 `--no-tui` 或 stdout 不是终端）。**运行完毕后 TUI 保持打开**，可查看完整工具调用记录与对话历史。左侧对话面板 + 右侧工具面板 / 护栏面板；底部状态栏显示轮次、Token、风险等级、模型、运行状态，有待审批请求时追加 `待审批: N（按 y 批准 / n 拒绝）`。
+
+| 按键 | 功能 |
+|------|------|
+| `y` / `n` | 批准 / 拒绝护栏请求（决定实时传回护栏管线） |
+| `q` / `Esc` / `Ctrl+C` | 退出 |
+| `Tab` | 切换面板焦点 |
+
+### 模式 3：纯文本（脚本 / CI / 管道）
+
+```bash
+auv run --no-tui "运行 cargo test 并修复失败的测试"
+auv run "task" > output.txt
+```
+
+---
+
+## 配置
+
+### 录入 API Key
 
 ```bash
 auv key status       # 查看已配置哪些 key（不显示明文）
@@ -267,235 +193,144 @@ auv key set          # 交互式录入（隐藏回显）
 auv key clear <名称>  # 删除存储的 key
 ```
 
-存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到权限为 `0600` 的 AES-256-GCM 加密文件。该回退密钥由机器标识派生，可防止凭据明文落盘，但不能抵御已能读取同机 machine-id 与用户文件的攻击者；无桌面环境优先使用权限受控的 secret file。
+存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到权限 `0600` 的 AES-256-GCM 加密文件（密钥由机器标识派生）。录入时 key 名称请使用 `OPENAI_API_KEY`。Agent 的读取优先级：配置文件 `[llm] api_key` → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储。
 
-录入时 key 名称请使用 `OPENAI_API_KEY`。Agent 的读取优先级为：配置文件 `[llm] api_key` → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储。推荐交互式 `auv key set`；容器推荐 `OPENAI_API_KEY_FILE`。
+### 两级配置
 
-### 设置 API Key 的其他方式
+启动时自动创建、已存在则绝不改动；项目配置字段级覆盖全局配置：
 
-除了 `auv key set`，也可以：
-
-```bash
-# 明文环境变量会暴露给同一用户下可读取进程环境的程序，仅适合临时开发。
-# 为避免 key 进入 shell history，请在隐藏输入后导出。
-read -rsp "OPENAI_API_KEY: " OPENAI_API_KEY && echo
-export OPENAI_API_KEY
-```
-
-```toml
-# ./.AuV/config.toml（优先级最高）
-[llm]
-api_key = "sk-your-key"
-```
+| 层级 | 路径 | 作用 |
+|------|------|------|
+| 全局 | `~/.AuV/config.toml` | 用户级默认值 |
+| 项目 | `./.AuV/config.toml` | 项目级覆盖（cwd 为 home 时跳过） |
 
 ### 使用兼容 API（DeepSeek / Groq / Ollama / vLLM）
 
-任何兼容 OpenAI Chat Completions 格式的服务都能用，只需改 `./.AuV/config.toml` 或 `~/.AuV/config.toml`：
+任何兼容 OpenAI Chat Completions 格式的服务都能用，只需改配置文件：
 
-**DeepSeek：**
-```toml
-[llm]
-model = "deepseek-chat"
-base_url = "https://api.deepseek.com/v1"
-api_key = "sk-your-deepseek-key"
-```
+| 服务 | `[llm] model` | `[llm] base_url` | 备注 |
+|------|--------------|------------------|------|
+| DeepSeek | `deepseek-chat` | `https://api.deepseek.com/v1` | 需真实 key |
+| Groq | `llama-3.1-70b-versatile` | `https://api.groq.com/openai/v1` | 需真实 key |
+| Ollama（本地） | `llama3.1` | `http://localhost:11434/v1` | key 填任意值即可 |
 
-**Groq：**
-```toml
-[llm]
-model = "llama-3.1-70b-versatile"
-base_url = "https://api.groq.com/openai/v1"
-api_key = "gsk-your-groq-key"
-```
+### 配置文件参考
 
-**本地 Ollama：**
-```toml
-[llm]
-model = "llama3.1"
-base_url = "http://localhost:11434/v1"
-api_key = "ollama"   # Ollama 不需要真实 key，但字段不能为空
-```
-
----
-
-## 3. 运行 Agent
-
-### 所有 CLI 入口总览
-
-```
-auv                       交互式 REPL（默认新会话）
-auv --resume              交互式 REPL（恢复上次自动保存的会话）
-auv run "task"            TUI 模式单次任务
-auv run --no-tui "task"   纯文本单次任务（CI/脚本）
-auv run -c cfg.toml "t"   使用自定义配置
-auv init                  初始化配置
-auv key status            查看 key 配置
-auv key set               录入 key
-auv key clear <name>     删除 key
-auv --help                查看所有命令
-auv --version             查看版本
-```
-
-### 示例
-
-```bash
-# REPL — 日常编程
-auv
-
-# 单次 — 查看并修复 bug
-auv run "src/auth.rs 中的登录函数在空密码时 panic，帮我修复"
-
-# 单次 — 重构
-auv run --no-tui "把 src/ 下所有的 unwrap() 替换成 ? 操作符"
-
-# 调低审批力度：高风险命令也自动批准（仅严重需审批）
-auv --approval none
-auv run --approval none "升级项目依赖"
-
-# 用 DeepSeek
-auv run -c deepseek.toml "解释一下这个项目的架构"
-
-# 写 Dockerfile 然后构建
-auv run "写一个 Dockerfile 用于部署这个 Rust 项目"
-```
-
----
-
-## 4. 配置文件
-
-`auv init` 会在当前目录创建 `./.AuV/config.toml`（cwd 为 home 时创建 `~/.AuV/config.toml`）。所有字段都有默认值，不创建配置文件也能正常运行（首次启动会自动创建两级配置）。
+`auv init` 会创建 `./.AuV/config.toml`；所有字段都有默认值。常用字段：
 
 ```toml
 [llm]
-provider = "openai"                          # LLM 供应商
 model = "gpt-4o"                             # 模型名
 base_url = "https://api.openai.com/v1"       # API 地址（兼容服务改这里）
-api_key = "sk-..."                           # API key（可选，也可用环境变量）
-max_tokens = 4096
-temperature = 0.0
+api_key = "sk-..."                           # 可选，也可用环境变量 / 安全存储
 timeout_secs = 120
 
 [agent]
 max_turns = 50                               # 最大循环轮次
-token_budget = 100000                        # Token 上限（可选）
 system_prompt = ""                           # 自定义 system prompt（可选）
-skills_dir = ".skills"                       # 技能文件目录
 
 [guardrails]
-enabled = true                               # 启用护栏
-rules_file = "rules.md"                      # 规则文件路径
-approval_timeout_secs = 120                  # 审批超时
-approval_level = "low"                       # 审批力度：none/low/medium/high（见护栏章节）
-audit_log_path = ".AuV/audit.jsonl"     # 审计日志路径
+approval_timeout_secs = 120                  # 审批超时（超时自动拒绝）
+approval_level = "low"                       # none/low/medium/high（见核心机制）
+audit_log_path = ".AuV/audit.jsonl"          # 审计日志路径
 
 [sandbox]
-enabled = true
 network_allowed = true                       # 允许网络访问
 max_timeout_secs = 300                       # 命令执行超时
-allowed_commands = []                        # 命令白名单
-forbidden_commands = [                       # 命令黑名单
-    "rm -rf /",
-    "sudo",
-    "mkfs",
-]
+forbidden_commands = ["rm -rf /", "sudo", "mkfs"]
 
 [tools]
-disabled_tools = []                          # 禁用某些工具（如 ["bash"]）
+disabled_tools = []                          # 禁用工具（如 ["bash"]）
 
 [memory]
-storage_path = ".AuV/memory"                     # 记忆存储路径
+storage_path = ".AuV/memory"                 # 记忆存储路径
 
 [feedback]
-enabled = true
 max_retries = 3                              # 最多自我修正轮次
+
+[subagent]
+max_depth = 3                                # 子 agent 递归深度上限
+max_total_agents = 10                        # 同时活跃子 agent 数上限
 ```
 
 ---
 
-## 5. 规则与技能
+## 核心机制
 
-### 规则文件（`rules.md`）
-
-声明式约束 agent 行为，一行一条规则，`#` 开头为注释：
-
-```markdown
-# Coding Rules
-- 所有函数必须写 doc comment
-- 使用 async/await，不写阻塞代码
-- 禁止使用 unwrap() 和 expect()
-- 错误类型要提供可操作的信息
-- 修改代码后必须运行 cargo test
-```
-
-规则会被注入到 system prompt 中，每次 LLM 调用都会看到。
-
-### 技能文件（`.skills/` 目录）
-
-将领域知识打包成技能文件，agent 按需加载：
-
-```markdown
----
-description: 部署应用到 Kubernetes 集群
----
-
-# K8s Deploy Skill
-
-## pre-deploy check
-- kubectl cluster-info
-- kubectl get pods -n production
-
-## deploy steps
-1. docker build -t app:latest .
-2. kubectl apply -f k8s/deployment.yaml
-3. kubectl rollout status deployment/app
-```
-
-Agent 会在 relevant 时自动读取完整 skill 内容。REPL 中用 `/skills` 查看当前已加载的技能列表（名称 + 描述）。
-
----
-
-## 6. 护栏系统
-
-四层管线确保危险操作被拦截：
+### 四层护栏管线
 
 | 层级 | 名称 | 机制 | 示例 |
 |------|------|------|------|
 | L1 | 静态规则 | glob 模式匹配，Allow/Deny/Escalate | `rm -rf /` → 直接 Deny |
 | L2 | 风险评估 | 命令/文件/网络三维度打分 | `curl \| bash` → High |
-| L3 | 人工审批 | 工具调用风险超过审批力度阈值时暂停，等待 y/n | 审批超时自动拒绝 |
+| L3 | 人工审批 | 风险超过审批力度阈值时暂停，等待 y/n | 审批超时自动拒绝 |
 | L4 | 沙箱边界 | 工作目录限制、命令黑白名单 | 写 `/etc/` → 拒绝 |
 
-所有护栏决策写入 `.AuV/audit.jsonl`。
-
-### 审批力度（L3 阈值）
-
-`approval_level` 四档（默认「低」），控制「风险等级**低于等于**对应阈值时自动批准命令」：
+所有护栏决策写入 `.AuV/audit.jsonl`。审批力度四档（默认「低」）控制「风险等级**低于等于**对应阈值时自动批准命令」：
 
 | 档位 | 自动批准阈值 | 行为 |
 |------|-------------|------|
-| 无   | 高          | 仅严重（Critical）需审批 |
-| 低   | 中          | 高/严重需审批（默认，与历史行为一致） |
-| 中   | 低          | 中及以上需审批 |
-| 高   | 无          | 所有风险等级的工具调用都需审批 |
+| 无 | 高 | 仅严重（Critical）需审批 |
+| 低 | 中 | 高/严重需审批（默认） |
+| 中 | 低 | 中及以上需审批 |
+| 高 | 无 | 所有风险等级的工具调用都需审批 |
 
-- 静态规则 L1 的 Deny 始终硬拦截，不受力度影响；L1 Escalate 把评估等级抬到高，在「无」档下同样自动批准。
-- 审批只针对**工具调用**；`final_answer` 等无副作用动作永不审批。
-- 三种设置途径（命令行参数优先于配置文件，REPL 指令运行时切换）：
-  - 命令行：`auv --approval high`、`auv run --approval none "任务"`（REPL/TUI/CLI 所有模式可用，主值为英文 `none`/`low`/`medium`/`high`，中文「无/低/中/高」为兼容别名）
-  - 配置文件：`[guardrails] approval_level = "medium"`（主值英文，中文档位名为兼容别名）
-  - REPL：`/approval` 查看、`/approval <无|低|中|高>` 切换（中英文档位名均可，下轮任务生效）
+L1 的 Deny 始终硬拦截，不受力度影响；审批只针对工具调用。三种设置途径：命令行 `--approval <none|low|medium|high>`（中文「无/低/中/高」为兼容别名）、配置文件 `[guardrails] approval_level`、REPL `/approval` 指令。
+
+### 反馈闭环
+
+工具产出经测试 / 静态检查校验，失败结果（文件、行号、错误信息）注入下一轮 LLM 上下文，驱动 agent 自我修正，最多 `max_retries` 轮。Demo 2 演示了这一过程（写 bug 代码 → 反馈失败 → 修正）。
+
+### 子 agent 委派
+
+`subagent` 工具把任务委派给独立对话上下文与独立工具集的子 agent，只返回摘要给主循环。子 agent 递归深度受 `max_depth` 约束、活跃数量受 `max_total_agents` 约束；审批请求路由回父界面（REPL 审批块标注「子 agent」，TUI 护栏面板标注来源）。隔离模式当前仅 SameProcess（子 loop 在子线程运行）；Worktree 为预留项，调用返回明确错误。
+
+### 规则与技能
+
+`rules.md` 一行一条声明式约束，注入 system prompt：
+
+```markdown
+# Coding Rules
+- 修改代码后必须运行 cargo test
+- 禁止使用 unwrap() 和 expect()
+```
+
+`.skills/` 目录下带 frontmatter 的技能文件按需加载（命中时读全文），REPL `/skills` 查看列表。
 
 ---
 
-## 7. 目录结构
+## 机制演示
+
+四项确定性演示（mock LLM 驱动、离线运行、约 0.00s 完成），覆盖课程 A 类项目 §A.6 要求的机制演示：
+
+```bash
+# 运行全部四项（--nocapture 显示演示横幅）
+cargo test --test mechanism_demo -- --nocapture
+
+# 运行单项（逐个展示更清晰）
+cargo test --test mechanism_demo demo_guardrail_intercepts_dangerous_action -- --nocapture
+cargo test --test mechanism_demo demo_feedback_loop_drives_correction -- --nocapture
+cargo test --test mechanism_demo demo_guardrail_pipeline_full_flow -- --nocapture
+cargo test --test mechanism_demo demo_subagent_delegation_aggregates_result -- --nocapture
+```
+
+| 演示 | 内容 |
+|------|------|
+| Demo 1 | 护栏拦截危险动作：`rm -rf /` 在工具执行前被 L1 静态规则拒绝 |
+| Demo 2 | 反馈闭环驱动自我修正：写 bug 代码 → 反馈失败 → 注入上下文 → 修正 |
+| Demo 3 | 护栏管线全流程：四层逐层验证 + `curl \| bash` 走完 L1→L2→L3 超时否决 |
+| Demo 4 | 子 agent 委派：父 agent 委派「计算 2+2」→ 子 agent 独立上下文算出结果 → 父汇总 |
+
+---
+
+## 目录结构
 
 ```
 harnessAgent/
 ├── src/
-│   ├── main.rs              # CLI 入口（6 个子命令 + REPL）
+│   ├── main.rs              # CLI 入口（子命令 + REPL）
 │   ├── lib.rs               # 库根
 │   ├── types.rs             # 核心数据类型
-│   ├── error.rs             # 错误类型
 │   ├── llm/                 # LLM 抽象层（trait + openai + mock）
 │   ├── config/              # 配置（HarnessConfig + rules + skills）
 │   ├── loop/                # Agent 主循环（AgentLoop + parser + context）
@@ -503,12 +338,13 @@ harnessAgent/
 │   ├── guardrails/          # 护栏系统（四层管线）
 │   ├── feedback/            # 反馈闭环（test/lint/typeck）
 │   ├── memory/              # 记忆系统（文件级）
-│   ├── credentials/         # 凭据管理（keyring + enc file）
+│   ├── credentials/         # 凭据管理（keyring + 加密文件）
 │   ├── observability/       # 可观测性（trace log）
 │   ├── subagent/            # 子 Agent 派发（深度传播 + AgentLoopRunner + 审批路由）
 │   └── tui/                 # 终端 UI（ratatui）
-├── docs/superpowers/        # 设计文档与计划
 ├── tests/mechanism_demo.rs  # 机制演示测试（4 项）
+├── docs/                    # 设计文档与计划（SPEC/PLAN/AGENT_LOG/REFLECTION 等）
+├── doc/                     # 课程项目要求原文（通用要求 + A 类项目说明）
 ├── .AuV/config.toml         # 项目局部配置（可选）
 ├── rules.md                 # 规则文件（可选）
 ├── Cargo.toml
@@ -517,26 +353,23 @@ harnessAgent/
 
 ---
 
-## 8. 开发与测试
+## 开发与测试
 
 ```bash
-# 运行全部确定性测试（不依赖真实 LLM API）
+# 全部确定性测试（不依赖真实 LLM API）
 cargo test --all-targets --locked -- --test-threads=1
 cargo test --doc --locked
 
-# 运行机制演示
-cargo test --test mechanism_demo
+# 机制演示（带横幅输出）
+cargo test --test mechanism_demo -- --nocapture
 
 # 编译 release
 cargo build --release
-
-# 查看日志（设置 log level）
-RUST_LOG=debug cargo run
 ```
 
 ---
 
-## 9. CI/CD 与发布
+## CI/CD 与发布
 
 - `.github/workflows/ci.yml` 在每次 push、pull request 和手动触发时运行全目标编译检查、Clippy、全部测试、release 构建与 Docker 构建/烟雾测试。Clippy 当前作为建议项输出既有 lint 债务，不使用 `-D warnings` 阻断交付。
 - CI 通过后可下载 `auv-linux-x86_64-gnu` 构建产物，保留 14 天。
@@ -558,3 +391,4 @@ RUST_LOG=debug cargo run
 - **二进制签名**：GitHub Release 的 Linux 二进制当前未签名，只提供 SHA-256 校验文件。
 - **自定义 API 传输**：默认远端端点使用 HTTPS；为兼容本地 Ollama/vLLM，当前不会禁止自定义 HTTP URL。非回环地址应只配置 HTTPS。
 - **流式输出**：LLM 响应不是流式的，大任务时等待时间较长。
+- **子 agent**：REPL 在子 agent 运行期间无法刷新界面（工具执行同步阻塞）；审批超时后子线程无法强制终止（后台跑完、结果丢弃）；Worktree 隔离未实现。
