@@ -156,7 +156,7 @@ mod tests {
 
     #[async_trait]
     impl AgentRunner for MockRunner {
-        async fn run(&self, _task: &str, _spawner: &SubagentSpawner) -> Result<String> {
+        async fn run(&self, _task: &str, _spawner: Arc<SubagentSpawner>) -> Result<String> {
             Ok(self.result.clone())
         }
     }
@@ -166,7 +166,7 @@ mod tests {
 
     #[async_trait]
     impl AgentRunner for SlowRunner {
-        async fn run(&self, _task: &str, _spawner: &SubagentSpawner) -> Result<String> {
+        async fn run(&self, _task: &str, _spawner: Arc<SubagentSpawner>) -> Result<String> {
             tokio::time::sleep(Duration::from_millis(1500)).await;
             Ok("slow done".to_string())
         }
@@ -269,7 +269,7 @@ mod tests {
             async fn run(
                 &self,
                 _task: &str,
-                _spawner: &SubagentSpawner,
+                _spawner: Arc<SubagentSpawner>,
             ) -> Result<String> {
                 Err(crate::error::HarnessError::Config("mock 失败".to_string()))
             }
