@@ -15,6 +15,14 @@ if ((status == 0)); then
 fi
 
 # GitHub's public Checks API exposes annotations even when full logs require login.
-details=$(tail -n 80 "$log_file" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a;N;$!ba;s/\n/%0A/g')
+summary=$(
+    grep -E -A 5 \
+        "panicked at|assertion .* failed|test .* \.\.\. FAILED|^failures:$|^test result: FAILED|^error(\[|:)" \
+        "$log_file" | tail -n 80 || true
+)
+if [[ -z "$summary" ]]; then
+    summary=$(tail -n 40 "$log_file")
+fi
+details=$(printf '%s' "$summary" | tail -c 12000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a;N;$!ba;s/\n/%0A/g')
 printf '::error title=Cargo test failed::%s\n' "$details"
 exit "$status"
