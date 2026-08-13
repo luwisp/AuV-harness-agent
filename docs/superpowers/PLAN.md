@@ -735,21 +735,23 @@ enum Commands {
 
 **文件**：`Dockerfile`、`.dockerignore`（新建）
 
-**关键实现**：多阶段构建——`rust:1.85-alpine` 构建 + `alpine:3.21` 运行（含 ca-certificates、git），ENTRYPOINT `auv`。`.dockerignore` 排除 `target/`、`.git/`、数据目录、`.env`、`*.md`。
+**关键实现**：多阶段构建——`rust:1.88-alpine` 构建 + `alpine:3.21` 精简运行层；补齐 OpenSSL 静态链接依赖，只复制 `Cargo.toml`、`Cargo.lock` 与 `src/`；运行时使用非 root 用户、`tini`、`auv` ENTRYPOINT。`.dockerignore` 排除 git 元数据、构建产物、Agent 状态、凭据与开发文档。
 
-**验证**：`docker build -t auv .` 构建成功。
+**验证**：Podman 等价执行 `docker build` 成功；`auv --version` 输出 `auv 0.1.0`；容器 UID/GID 1000，工作目录与配置目录可写；运行镜像约 45 MB。
 
-**完成状态**：✓ 已完成 — commit `83eadc5`（feat: add Dockerfile and GitHub Actions CI workflow）
+**完成状态**：✓ 初版 commit `83eadc5`；发布收尾与凭据链路修复 commit `7079391`
 
 ---
 
 #### 任务 31：CI 工作流
 
-**文件**：`.github/workflows/ci.yml`（新建）
+**文件**：`.github/workflows/ci.yml`、`.github/workflows/publish.yml`、`.gitlab-ci.yml`
 
-**关键实现**：`unit-test` job——checkout → rust-toolchain → `cargo test --verbose` → `cargo build --release`。
+**关键实现**：GitHub CI 在每次 push/PR 执行 Rust 1.88 全目标检查、Clippy、全部测试与 doctest、release 构建/烟雾测试、Docker 构建/烟雾测试，并上传 Linux x86_64 GNU 二进制；Publish 流水线先验收测试，再向 GHCR 发布 `linux/amd64` 镜像，`v*` 标签同时创建带 SHA-256 的 GitHub Release；GitLab CI 提供课程指定的 `unit-test` job。
 
-**完成状态**：✓ 已完成 — commit `83eadc5`。课程要求的 `.gitlab-ci.yml` 由并行工作流另行补齐（本计划任务范围外）。
+**验证**：本地 448 项测试通过（370 lib + 71 bin + 3 mechanism demo + 4 doctest）；Rust 1.88 下 `cargo check` 与 Clippy 成功。仓库存在约 300 条既有 Clippy 风格建议，因此 Clippy 以建议模式运行，`cargo check`、测试、构建与容器烟雾测试为阻断门。
+
+**完成状态**：✓ 初版 commit `83eadc5`；完整 CI/CD 与分发收尾 commit `7079391`
 
 ---
 
@@ -770,9 +772,9 @@ enum Commands {
 
 ---
 
-## 5. REPL 交互层扩展（计划外新增阶段）
+## 5. REPL 交互层扩展
 
-> 2026-08 实现，将一次性 `auv run "task"` 扩展为交互式 REPL（对标 Claude Code 对话体验）。设计文档原文见 history/specs/ 与 history/PLAN_REPL_CN.md。
+> 实现，将一次性 `auv run "task"` 扩展为交互式 REPL（对标 Claude Code 对话体验）。设计文档原文见 history/specs/ 与 history/PLAN_REPL_CN.md。
 
 ### 5.1 设计决策
 
