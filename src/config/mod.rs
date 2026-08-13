@@ -20,6 +20,8 @@ pub struct HarnessConfig {
     pub feedback: FeedbackConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub subagent: SubagentConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +107,16 @@ pub struct AgentConfig {
     pub skills_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentConfig {
+    /// 子 agent 最大递归深度（0 表示禁止委派）。
+    #[serde(default = "default_subagent_max_depth")]
+    pub max_depth: usize,
+    /// 同一时刻允许运行（含等待超时回收）的子 agent 总数上限。
+    #[serde(default = "default_subagent_max_total")]
+    pub max_total_agents: usize,
+}
+
 // Default value functions
 
 fn default_provider() -> String { "openai".to_string() }
@@ -120,6 +132,8 @@ fn default_memory_path() -> PathBuf { PathBuf::from(".AuV/memory") }
 fn default_max_entries() -> usize { 1000 }
 fn default_max_retries() -> usize { 3 }
 fn default_max_turns() -> usize { 50 }
+fn default_subagent_max_depth() -> usize { 3 }
+fn default_subagent_max_total() -> usize { 10 }
 fn default_channels() -> Vec<String> {
     vec!["test".to_string(), "type_check".to_string(), "lint".to_string()]
 }
@@ -134,6 +148,16 @@ impl Default for HarnessConfig {
             memory: MemoryConfig::default(),
             feedback: FeedbackConfig::default(),
             agent: AgentConfig::default(),
+            subagent: SubagentConfig::default(),
+        }
+    }
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: default_subagent_max_depth(),
+            max_total_agents: default_subagent_max_total(),
         }
     }
 }
@@ -497,6 +521,48 @@ approval_timeout_secs = 5
             "序列化应输出英文主值 low，实际：{}",
             toml_str
         );
+    }
+
+    // ===== 子 agent 配置 =====
+
+    #[test]
+    fn test_subagent_config_defaults() {
+        let config = HarnessConfig::default();
+        assert_eq!(config.subagent.max_depth, 3, "默认递归深度应为 3");
+        assert_eq!(config.subagent.max_total_agents, 10, "默认总数上限应为 10");
+    }
+
+    #[test]
+    fn test_subagent_config_parses_toml() {
+        let toml_content = r#"
+[llm]
+model = "m"
+
+[subagent]
+max_depth = 5
+max_total_agents = 20
+"#;
+        let config: HarnessConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.subagent.max_depth, 5);
+        assert_eq!(config.subagent.max_total_agents, 20);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_subagent_config_max_depth_zero_disables() {
+        // max_depth = 0 语义为「禁止委派」：配置本身合法，
+        // 实际拒绝由 spawner 的 RecursionDepthExceeded 自然生效。
+        let toml_content = r#"
+[llm]
+model = "m"
+
+[subagent]
+max_depth = 0
+"#;
+        let config: HarnessConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.subagent.max_depth, 0);
+        assert_eq!(config.subagent.max_total_agents, 10, "未写的字段用默认值");
+        assert!(config.validate().is_ok(), "max_depth = 0 不应被配置校验拒绝");
     }
 
     // ===== 分层配置 =====
