@@ -5,14 +5,14 @@
 ## 目标
 
 1. 项目改名为 **AuV harness agent**（简称 **AuV**）：二进制、品牌文案、默认提示词全改
-2. 配置改为两级目录：全局 `~/AuV/`、项目局部 `./AuV/`，含默认模型、默认审批力度等
+2. 配置改为两级目录：全局 `~/.AuV/`、项目局部 `./.AuV/`，含默认模型、默认审批力度等
 3. 用 `AuV.md` 加载角色说明，兼容已有角色说明文件（CLAUDE.md/AGENTS.md 等）
 
 ## 已确认的决策
 
 | 问题 | 决策 |
 |------|------|
-| 配置文件名 | `config.toml`（`~/AuV/config.toml` 与 `./AuV/config.toml`） |
+| 配置文件名 | `config.toml`（`~/.AuV/config.toml` 与 `./.AuV/config.toml`） |
 | 改名深度 | 品牌全改 + 二进制 `harness`→`auv`；lib/包名、内部类型名、`.harness` 目录、keyring 服务名**不动** |
 | AuV.md | 两级（全局 + 项目），兼容已有 CLAUDE.md/AGENTS.md（优先使用，不改文件名） |
 | 优先级 | 字段级合并：局部覆盖全局；项目根旧 `config.toml` **不再加载**（仅迁移提示） |
@@ -22,16 +22,16 @@
 ### 1. 两级配置目录
 
 ```
-~/AuV/config.toml    ← 全局配置（用户级默认值）
-./AuV/config.toml    ← 局部配置（项目级覆盖；cwd == home 时不创建/不加载）
+~/.AuV/config.toml    ← 全局配置（用户级默认值）
+./.AuV/config.toml    ← 局部配置（项目级覆盖；cwd == home 时不创建/不加载）
 ```
 
 **加载逻辑（`load_config` 改造）：**
 
 1. `--config <path>` 显式指定 → 只读该文件（现有行为不变）
 2. 否则分层：
-   - 全局 `~/AuV/config.toml`：不存在 → 创建目录并写入默认配置；存在 → 原样读取，**绝不覆盖**
-   - 局部 `./AuV/config.toml`（仅当 cwd ≠ home）：同上
+   - 全局 `~/.AuV/config.toml`：不存在 → 创建目录并写入默认配置；存在 → 原样读取，**绝不覆盖**
+   - 局部 `./.AuV/config.toml`（仅当 cwd ≠ home）：同上
 3. 合并：`toml::Value` 递归合并（局部键覆盖全局键，Vec 整体替换不追加）后反序列化为 `HarnessConfig`
 4. 旧 `config.toml`：检测到存在时打印一行迁移提示，不自动迁移、不加载
 
@@ -39,7 +39,7 @@
 
 检测顺序（取第一个存在的文件）：
 
-- 全局：`~/AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`
+- 全局：`~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`
 - 项目：`./AuV.md` → `./CLAUDE.md` → `./AGENTS.md`
 
 **合成规则（追加式叠加，低优先级在前）：**
@@ -57,7 +57,7 @@
 
 ### 3. 命令与错误处理
 
-- `auv init`：创建 `./AuV/config.toml`（cwd == home 时创建 `~/AuV/config.toml`），已存在则提示不覆盖
+- `auv init`：创建 `./.AuV/config.toml`（cwd == home 时创建 `~/.AuV/config.toml`），已存在则提示不覆盖
 - 配置损坏（TOML 解析失败）→ 中文错误并退出，不静默回退默认
 - 目录创建失败 → 中文警告，继续用默认配置运行
 
@@ -83,4 +83,4 @@
   - 损坏 TOML → 报错退出
   - `--config` 显式路径优先
 - 既有测试更新：`harness`→`auv` 文案断言、`load_config` 旧语义用例
-- E2E 冒烟（tmux）：`auv` 启动自动创建 `~/AuV/` 与 `./AuV/`、AuV.md 角色生效、审批力度局部覆盖生效
+- E2E 冒烟（tmux）：`auv` 启动自动创建 `~/.AuV/` 与 `./.AuV/`、AuV.md 角色生效、审批力度局部覆盖生效

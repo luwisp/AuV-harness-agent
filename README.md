@@ -198,7 +198,7 @@ auv init
 ```
 
 交互式引导会：
-1. 创建 `./AuV/config.toml` — 项目局部配置（当前目录为 home 时创建全局配置）
+1. 创建 `./.AuV/config.toml` — 项目局部配置（当前目录为 home 时创建全局配置）
 2. 创建 `.memory/` — 记忆存储目录
 3. 引导你输入 API Key（隐藏回显）
 
@@ -208,13 +208,13 @@ AuV 使用「全局 + 项目」两级配置，**启动时自动创建，已存�
 
 | 层级 | 路径 | 作用 |
 |------|------|------|
-| 全局 | `~/AuV/config.toml` | 用户级默认值（默认模型、默认审批力度等） |
-| 项目 | `./AuV/config.toml` | 项目级覆盖（当前目录为 home 时跳过） |
+| 全局 | `~/.AuV/config.toml` | 用户级默认值（默认模型、默认审批力度等） |
+| 项目 | `./.AuV/config.toml` | 项目级覆盖（当前目录为 home 时跳过） |
 
 - **字段级合并**：项目配置写了哪个字段就覆盖哪个，未写的继承全局
 - **显式指定**：`auv run -c <路径> "任务"` 只读指定文件，不走分层
 - **旧版迁移**：项目根 `config.toml` 不再加载，启动时提示迁移
-- **角色说明**：`AuV.md` 用于加载角色说明——项目内按 `AuV.md` → `CLAUDE.md` → `AGENTS.md` 取第一个存在的文件（已有这些文件的项目无需改名）；全局对应 `~/AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`。两级叠加到默认提示词之后，配置内联 `[agent] system_prompt` 优先级最高
+- **角色说明**：`AuV.md` 用于加载角色说明——项目内按 `AuV.md` → `CLAUDE.md` → `AGENTS.md` 取第一个存在的文件（已有这些文件的项目无需改名）；全局对应 `~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`。两级叠加到默认提示词之后，配置内联 `[agent] system_prompt` 优先级最高
 
 ---
 
@@ -235,19 +235,19 @@ auv key clear <名称>  # 删除存储的 key
 除了 `auv key set`，也可以：
 
 ```bash
-# 环境变量（优先级低于 ./AuV/config.toml）
+# 环境变量（优先级低于 ./.AuV/config.toml）
 export OPENAI_API_KEY="sk-your-key"
 ```
 
 ```toml
-# ./AuV/config.toml（优先级最高）
+# ./.AuV/config.toml（优先级最高）
 [llm]
 api_key = "sk-your-key"
 ```
 
 ### 使用兼容 API（DeepSeek / Groq / Ollama / vLLM）
 
-任何兼容 OpenAI Chat Completions 格式的服务都能用，只需改 `./AuV/config.toml` 或 `~/AuV/config.toml`：
+任何兼容 OpenAI Chat Completions 格式的服务都能用，只需改 `./.AuV/config.toml` 或 `~/.AuV/config.toml`：
 
 **DeepSeek：**
 ```toml
@@ -320,7 +320,7 @@ auv run "写一个 Dockerfile 用于部署这个 Rust 项目"
 
 ## 4. 配置文件
 
-`auv init` 会在当前目录创建 `./AuV/config.toml`（cwd 为 home 时创建 `~/AuV/config.toml`）。所有字段都有默认值，不创建配置文件也能正常运行（首次启动会自动创建两级配置）。
+`auv init` 会在当前目录创建 `./.AuV/config.toml`（cwd 为 home 时创建 `~/.AuV/config.toml`）。所有字段都有默认值，不创建配置文件也能正常运行（首次启动会自动创建两级配置）。
 
 ```toml
 [llm]
@@ -466,7 +466,7 @@ harnessAgent/
 │   └── tui/                 # 终端 UI（ratatui）
 ├── docs/superpowers/        # 设计文档与计划
 ├── tests/mechanism_demo.rs  # 机制演示测试
-├── AuV/config.toml         # 项目局部配置（可选）
+├── .AuV/config.toml         # 项目局部配置（可选）
 ├── rules.md                 # 规则文件（可选）
 ├── Cargo.toml
 └── Dockerfile

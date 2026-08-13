@@ -5,3 +5,4 @@ config.toml
 # 本地工具与会话运行时数据
 .claude/
 .harness/
+.AuV/

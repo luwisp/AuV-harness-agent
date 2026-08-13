@@ -79,7 +79,7 @@ enum Commands {
         no_tui: bool,
     },
 
-    /// 初始化 AuV 配置（./AuV/config.toml、.memory 目录、API 密钥）
+    /// 初始化 AuV 配置（./.AuV/config.toml、.memory 目录、API 密钥）
     Init,
 
     /// Manage API keys
@@ -1518,7 +1518,7 @@ fn build_repl_prompt(status_line: &str) -> String {
 // ============================================================================
 
 /// 加载配置：`--config` 显式指定时只读该文件；否则按「全局 → 局部」分层加载
-/// （`~/AuV/config.toml` → `./AuV/config.toml`，局部字段级覆盖全局）。
+/// （`~/.AuV/config.toml` → `./.AuV/config.toml`，局部字段级覆盖全局）。
 /// 返回 (配置, 用户提示)。
 fn load_config(path: Option<PathBuf>) -> Result<(HarnessConfig, Vec<String>)> {
     match path {
@@ -1806,12 +1806,12 @@ async fn run_init() -> Result<()> {
     println!("AuV 初始化");
     println!("==========");
 
-    // 1. 创建项目局部配置 ./AuV/config.toml（cwd 为 home 目录时创建全局配置）
+    // 1. 创建项目局部配置 ./.AuV/config.toml（cwd 为 home 目录时创建全局配置）
     let (home, cwd) = current_home_cwd();
     let config_path = if cwd == home {
-        home.join("AuV").join("config.toml")
+        home.join(".AuV").join("config.toml")
     } else {
-        cwd.join("AuV").join("config.toml")
+        cwd.join(".AuV").join("config.toml")
     };
     if config_path.exists() {
         let mut answer = String::new();
@@ -2275,8 +2275,8 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let (loaded, notices) = load_config_layered(home.path(), cwd.path()).unwrap();
         assert_eq!(loaded.llm.model, "gpt-4o"); // default
-        assert!(home.path().join("AuV/config.toml").exists());
-        assert!(cwd.path().join("AuV/config.toml").exists());
+        assert!(home.path().join(".AuV/config.toml").exists());
+        assert!(cwd.path().join(".AuV/config.toml").exists());
         assert_eq!(notices.len(), 2);
     }
 
@@ -2284,7 +2284,7 @@ mod tests {
     fn test_load_config_layered_from_local_file() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let local_dir = cwd.path().join("AuV");
+        let local_dir = cwd.path().join(".AuV");
         std::fs::create_dir_all(&local_dir).unwrap();
         let mut config = HarnessConfig::default();
         config.llm.model = "gpt-4o-mini".to_string();

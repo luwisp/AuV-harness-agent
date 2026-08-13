@@ -246,9 +246,9 @@ impl HarnessConfig {
 /// 分层配置路径。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayeredPaths {
-    /// 全局配置：`~/AuV/config.toml`
+    /// 全局配置：`~/.AuV/config.toml`
     pub global: PathBuf,
-    /// 项目局部配置：`./AuV/config.toml`（cwd 为 home 目录时为 None）
+    /// 项目局部配置：`./.AuV/config.toml`（cwd 为 home 目录时为 None）
     pub local: Option<PathBuf>,
     /// 旧版项目根 `./config.toml`（不再加载，仅用于迁移提示；cwd 为 home 时为 None）
     pub legacy: Option<PathBuf>,
@@ -256,7 +256,7 @@ pub struct LayeredPaths {
 
 /// 解析分层配置路径（纯函数，home/cwd 参数注入便于测试）。
 pub fn resolve_config_paths(home: &Path, cwd: &Path) -> LayeredPaths {
-    let global = home.join("AuV").join("config.toml");
+    let global = home.join(".AuV").join("config.toml");
     if cwd == home {
         LayeredPaths {
             global,
@@ -266,7 +266,7 @@ pub fn resolve_config_paths(home: &Path, cwd: &Path) -> LayeredPaths {
     } else {
         LayeredPaths {
             global,
-            local: Some(cwd.join("AuV").join("config.toml")),
+            local: Some(cwd.join(".AuV").join("config.toml")),
             legacy: Some(cwd.join("config.toml")),
         }
     }
@@ -324,7 +324,7 @@ pub const PERSONA_FILE_NAMES: [&str; 3] = ["AuV.md", "CLAUDE.md", "AGENTS.md"];
 
 /// 检测角色说明文件：返回 (全局角色文件, 项目角色文件)，取第一个存在的候选。
 ///
-/// 全局候选：`~/AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`
+/// 全局候选：`~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`
 /// 项目候选：`./AuV.md` → `./CLAUDE.md` → `./AGENTS.md`
 /// 两级都不存在时零打扰（不创建任何文件）。
 pub fn resolve_persona_files(home: &Path, cwd: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
@@ -332,7 +332,7 @@ pub fn resolve_persona_files(home: &Path, cwd: &Path) -> (Option<PathBuf>, Optio
         candidates.iter().find(|p| p.is_file()).cloned()
     }
     let global_candidates = [
-        home.join("AuV").join("AuV.md"),
+        home.join(".AuV").join("AuV.md"),
         home.join("CLAUDE.md"),
         home.join("AGENTS.md"),
     ];
@@ -386,7 +386,7 @@ pub fn load_layered(home: &Path, cwd: &Path) -> Result<LayeredLoad, crate::error
     if let Some(legacy) = &paths.legacy {
         if legacy.exists() {
             notices.push(format!(
-                "检测到旧版 {}，已不再加载；请将配置移至 ./AuV/config.toml",
+                "检测到旧版 {}，已不再加载；请将配置移至 ./.AuV/config.toml",
                 legacy.display()
             ));
         }
@@ -512,10 +512,10 @@ approval_timeout_secs = 5
             Path::new("/home/user"),
             Path::new("/home/user/projects/demo"),
         );
-        assert_eq!(paths.global, PathBuf::from("/home/user/AuV/config.toml"));
+        assert_eq!(paths.global, PathBuf::from("/home/user/.AuV/config.toml"));
         assert_eq!(
             paths.local,
-            Some(PathBuf::from("/home/user/projects/demo/AuV/config.toml"))
+            Some(PathBuf::from("/home/user/projects/demo/.AuV/config.toml"))
         );
         assert_eq!(
             paths.legacy,
@@ -526,7 +526,7 @@ approval_timeout_secs = 5
     #[test]
     fn test_resolve_config_paths_cwd_is_home_skips_local_and_legacy() {
         let paths = resolve_config_paths(Path::new("/home/user"), Path::new("/home/user"));
-        assert_eq!(paths.global, PathBuf::from("/home/user/AuV/config.toml"));
+        assert_eq!(paths.global, PathBuf::from("/home/user/.AuV/config.toml"));
         assert!(paths.local.is_none());
         assert!(paths.legacy.is_none());
     }
@@ -546,16 +546,16 @@ approval_timeout_secs = 5
         let cwd = tempdir();
         let load = load_layered(home.path(), cwd.path()).unwrap();
         assert_eq!(load.config.llm.model, "gpt-4o");
-        assert!(home.path().join("AuV/config.toml").exists(), "应创建全局配置");
-        assert!(cwd.path().join("AuV/config.toml").exists(), "应创建局部配置");
+        assert!(home.path().join(".AuV/config.toml").exists(), "应创建全局配置");
+        assert!(cwd.path().join(".AuV/config.toml").exists(), "应创建局部配置");
         assert_eq!(load.notices.len(), 2, "两个创建提示：{:?}", load.notices);
 
         // 幂等：二次加载不再创建/改动，也无提示
-        let before = std::fs::read_to_string(home.path().join("AuV/config.toml")).unwrap();
+        let before = std::fs::read_to_string(home.path().join(".AuV/config.toml")).unwrap();
         let load2 = load_layered(home.path(), cwd.path()).unwrap();
         assert!(load2.notices.is_empty(), "已存在时不应产生提示：{:?}", load2.notices);
         assert_eq!(
-            std::fs::read_to_string(home.path().join("AuV/config.toml")).unwrap(),
+            std::fs::read_to_string(home.path().join(".AuV/config.toml")).unwrap(),
             before,
             "已有配置绝不被改动"
         );
@@ -566,7 +566,7 @@ approval_timeout_secs = 5
         let home = tempdir();
         let cwd = tempdir();
         // 全局：model + 审批超时
-        let gdir = home.path().join("AuV");
+        let gdir = home.path().join(".AuV");
         std::fs::create_dir_all(&gdir).unwrap();
         std::fs::write(
             gdir.join("config.toml"),
@@ -574,7 +574,7 @@ approval_timeout_secs = 5
         )
         .unwrap();
         // 局部：只覆盖 model 与审批力度
-        let ldir = cwd.path().join("AuV");
+        let ldir = cwd.path().join(".AuV");
         std::fs::create_dir_all(&ldir).unwrap();
         std::fs::write(
             ldir.join("config.toml"),
@@ -600,7 +600,7 @@ approval_timeout_secs = 5
     fn test_load_layered_cwd_is_home_creates_only_global() {
         let home = tempdir();
         let load = load_layered(home.path(), home.path()).unwrap();
-        assert!(home.path().join("AuV/config.toml").exists());
+        assert!(home.path().join(".AuV/config.toml").exists());
         assert_eq!(load.notices.len(), 1, "只应有全局创建提示：{:?}", load.notices);
     }
 
@@ -623,7 +623,7 @@ approval_timeout_secs = 5
     fn test_load_layered_corrupt_global_errors() {
         let home = tempdir();
         let cwd = tempdir();
-        let gdir = home.path().join("AuV");
+        let gdir = home.path().join(".AuV");
         std::fs::create_dir_all(&gdir).unwrap();
         std::fs::write(gdir.join("config.toml"), "not [valid toml").unwrap();
         assert!(load_layered(home.path(), cwd.path()).is_err(), "损坏配置应报错退出");

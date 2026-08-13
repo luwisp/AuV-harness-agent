@@ -157,5 +157,5 @@ AuV harness agent REPL v0.1.0
 - [x] 护栏审批改 REPL 事件模式：审批块独立行打印、y/n 经决定通道发回、审批结束全屏重绘清除（含本轮助手消息重印），回归测试禁止 DECSC/DECRC
 - [x] 审批期间 Ctrl+C 视为拒绝（`tokio::signal::ctrl_c()` 监听，不再杀死进程）；行结束 `\r` 容错；审批竞态残留经 `approval_pending` 补重绘
 - [x] 项目更名 AuV：二进制 `auv`、横幅/CLI/默认提示词品牌化；`.harness` 数据目录与内部类型名保持
-- [x] 两级配置：`~/AuV/config.toml`（全局）与 `./AuV/config.toml`（项目，cwd 为 home 时跳过），启动自动创建（存在不改）、字段级合并（局部覆盖全局）、旧版 config.toml 迁移提示
-- [x] AuV.md 角色说明：全局（`~/AuV/AuV.md`）与项目（`./AuV.md`）两级检测，兼容已有 CLAUDE.md/AGENTS.md，叠加到默认提示词，内联 `[agent] system_prompt` 最高优先
+- [x] 两级配置：`~/.AuV/config.toml`（全局）与 `./.AuV/config.toml`（项目，cwd 为 home 时跳过），启动自动创建（存在不改）、字段级合并（局部覆盖全局）、旧版 config.toml 迁移提示
+- [x] AuV.md 角色说明：全局（`~/.AuV/AuV.md`）与项目（`./AuV.md`）两级检测，兼容已有 CLAUDE.md/AGENTS.md，叠加到默认提示词，内联 `[agent] system_prompt` 最高优先
