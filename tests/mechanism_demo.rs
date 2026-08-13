@@ -29,6 +29,8 @@ use harness_agent::types::{
     LlmResponse, TokenUsage, ToolCall, ToolResult,
 };
 use harness_agent::error::HarnessError;
+use harness_agent::subagent::{AgentLoopRunner, SubagentSpawner};
+use harness_agent::tools::subagent::SubagentTool;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -684,6 +686,252 @@ async fn demo_guardrail_pipeline_full_flow() {
     println!("=========================================================");
     println!("  All four layers verified independently");
     println!("  Full pipeline trace: L1 Escalate → L2 High → L3 Timeout → Denied");
+    println!("=========================================================");
+    println!();
+}
+
+// ============================================================================
+// Demo 4: 父 agent 委派子 agent 并汇总结果（subagent 机制）
+// ============================================================================
+
+/// Demonstrates the subagent delegation mechanism: the parent agent delegates
+/// a computation to an independent child agent (own conversation, own tools)
+/// via the `subagent` tool, then aggregates the child's summary into its
+/// final answer.
+///
+/// - 父 mock LLM：Turn 1 发起 subagent 工具调用（委派「计算 2+2」），
+///   Turn 2 收到子 agent 摘要后给出汇总回答；
+/// - 子 mock LLM：独立的对话循环，直接给出「计算完成：结果为 4」；
+/// - 工厂闭包（AgentLoopRunner）为每次委派构建独立子 loop，
+///   并给子 loop 注册递归 subagent 工具（嵌套委派能力）。
+#[tokio::test]
+async fn demo_subagent_delegation_aggregates_result() {
+    // 1. 工厂闭包：为每次委派构建独立的子 AgentLoop（demo 2 同款装配），
+    //    并注册递归 subagent 工具（子层 spawner）——嵌套委派的能力由
+    //    深度限制兜底。子 mock LLM 每次调用新建（Fn 闭包可重复调用）
+    let factory: std::sync::Arc<
+        dyn Fn(std::sync::Arc<SubagentSpawner>) -> Result<AgentLoop, HarnessError> + Send + Sync,
+    > = std::sync::Arc::new(move |child_spawner| {
+        // 子 mock LLM：独立执行计算任务，直接给出 FinalAnswer
+        let child_mock = MockLlmProvider::new(vec![LlmResponse {
+            content: "FINAL ANSWER: 计算完成：结果为 4".to_string(),
+            reasoning_content: None,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            },
+            tool_calls: None,
+        }]);
+
+        // 子 loop 独立工具集：递归 subagent 工具（子层 spawner）
+        let mut child_tools = ToolRegistry::new();
+        child_tools
+            .register(Box::new(SubagentTool::new(child_spawner.clone())))
+            .unwrap();
+
+        let mut child_rules = StaticRuleEngine::new();
+        child_rules.load_builtin_rules();
+        let child_pipeline = GuardrailPipeline::new(
+            child_rules,
+            vec![],
+            ApprovalGate::new(Duration::from_millis(1)),
+            SandboxBoundary {
+                workspace_root: PathBuf::from("/tmp/demo4-workspace"),
+                allowed_commands: vec![],
+                forbidden_commands: vec![],
+                max_timeout: Duration::from_secs(300),
+                network_allowed: true,
+            },
+            AuditLog::new(PathBuf::from("/dev/null")),
+            ApprovalLevel::default(),
+        );
+
+        // 子内存目录为固定路径：工厂可被多次调用，不能依赖临时目录
+        // 生命周期（测试结束后清理）
+        let child_memory = MemoryStore::new(PathBuf::from("/tmp/auv-demo4-child-memory"))
+            .expect("child memory store");
+
+        let mut child_config = HarnessConfig::default();
+        child_config.agent.max_turns = 5;
+
+        let child_context_builder = ContextBuilder::new(
+            "你是子 agent：独立执行委派的任务，完成后以 FINAL ANSWER: 开头给出结果。"
+                .to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+
+        Ok(AgentLoop::new(
+            Box::new(child_mock),
+            child_pipeline,
+            child_tools,
+            FeedbackRunner::new(vec![], 3),
+            child_memory,
+            child_config,
+            child_context_builder,
+            PathBuf::from("/tmp/demo4-workspace"),
+            None,
+        ))
+    });
+
+    // 3. 根 spawner + AgentLoopRunner：生产装配（同 main.rs 模式）
+    let root_spawner = std::sync::Arc::new(SubagentSpawner::new(
+        3,
+        10,
+        std::sync::Arc::new(AgentLoopRunner::new(factory.clone())),
+    ));
+
+    // 4. 工厂装配验证：子 loop 应注册递归 subagent 工具
+    let probe = factory(root_spawner.for_child()).expect("factory builds child loop");
+    let child_tool_names = probe.tools().names();
+    assert!(
+        child_tool_names.contains(&"subagent".to_string()),
+        "子 loop 应注册递归 subagent 工具（嵌套委派能力），got {:?}",
+        child_tool_names
+    );
+    drop(probe);
+
+    // 5. 父 mock LLM：先委派，后汇总
+    let parent_mock = MockLlmProvider::new(vec![
+        // Turn 1: 委派「计算 2+2」给子 agent
+        LlmResponse {
+            content: String::new(),
+            reasoning_content: None,
+            finish_reason: FinishReason::ToolCalls,
+            usage: TokenUsage {
+                prompt_tokens: 15,
+                completion_tokens: 5,
+                total_tokens: 20,
+            },
+            tool_calls: Some(vec![ToolCall {
+                id: "call-sub-1".to_string(),
+                name: "subagent".to_string(),
+                arguments: json!({"task": "计算 2+2 并返回结果"}).to_string(),
+            }]),
+        },
+        // Turn 2: 汇总子 agent 摘要
+        LlmResponse {
+            content: "FINAL ANSWER: 委派完成：子 agent 汇总结果 4（2+2 计算正确）"
+                .to_string(),
+            reasoning_content: None,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage {
+                prompt_tokens: 30,
+                completion_tokens: 10,
+                total_tokens: 40,
+            },
+            tool_calls: None,
+        },
+    ]);
+
+    // 6. 父 loop 装配：工具集注册 subagent 工具（根 spawner）
+    let mut parent_tools = ToolRegistry::new();
+    parent_tools
+        .register(Box::new(SubagentTool::new(root_spawner)))
+        .unwrap();
+
+    let mut parent_rules = StaticRuleEngine::new();
+    parent_rules.load_builtin_rules();
+    let parent_pipeline = GuardrailPipeline::new(
+        parent_rules,
+        vec![],
+        ApprovalGate::new(Duration::from_millis(1)),
+        SandboxBoundary {
+            workspace_root: PathBuf::from("/tmp/demo4-workspace"),
+            allowed_commands: vec![],
+            forbidden_commands: vec![],
+            max_timeout: Duration::from_secs(300),
+            network_allowed: true,
+        },
+        AuditLog::new(PathBuf::from("/dev/null")),
+        ApprovalLevel::default(),
+    );
+
+    let parent_tempdir = TempDir::new().expect("parent tempdir");
+    let parent_memory =
+        MemoryStore::new(parent_tempdir.path().to_path_buf()).expect("parent memory store");
+
+    let mut parent_config = HarnessConfig::default();
+    parent_config.agent.max_turns = 10;
+
+    let parent_context_builder = ContextBuilder::new(
+        "你是主管 agent：把计算类任务委派给子 agent，汇总结果后以 FINAL ANSWER: 开头回答。"
+            .to_string(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    );
+
+    let mut parent_agent = AgentLoop::new(
+        Box::new(parent_mock),
+        parent_pipeline,
+        parent_tools,
+        FeedbackRunner::new(vec![], 3),
+        parent_memory,
+        parent_config,
+        parent_context_builder,
+        PathBuf::from("/tmp/demo4-workspace"),
+        None,
+    );
+
+    // 7. 运行父 agent
+    let result = parent_agent
+        .run("委派子 agent 计算 2+2，并汇总结果")
+        .await;
+
+    // 清理子内存目录（固定路径，测试专用）
+    let _ = std::fs::remove_dir_all("/tmp/auv-demo4-child-memory");
+
+    // 8. 断言：父摘要包含子 agent 的结果「4」
+    assert!(result.is_ok(), "父 agent 应成功完成，got {:?}", result);
+    let final_answer = result.unwrap();
+    assert!(
+        final_answer.contains("4"),
+        "父 agent 汇总应包含子 agent 的计算结果 4，got: {}",
+        final_answer
+    );
+
+    // 9. 断言：父 trace 首项为 subagent 工具调用，末项为 FinalAnswer
+    let trace = parent_agent.trace();
+    assert_eq!(
+        trace.len(),
+        2,
+        "Expected 2 trace entries (subagent 委派, 汇总回答), got {}",
+        trace.len()
+    );
+
+    match &trace[0].action {
+        Action::ToolCall { name, params, .. } => {
+            assert_eq!(name, "subagent", "第一项应为 subagent 工具调用");
+            let task = params["task"].as_str().unwrap_or_default();
+            assert!(
+                task.contains("2+2"),
+                "委派任务应包含「2+2」，got: {}",
+                task
+            );
+        }
+        other => panic!("Expected ToolCall on turn 0, got {:?}", other),
+    }
+
+    assert!(
+        matches!(trace[1].action, Action::FinalAnswer { .. }),
+        "第二项应为 FinalAnswer（汇总），got {:?}",
+        trace[1].action
+    );
+
+    println!();
+    println!("=========================================================");
+    println!("  Demo 4: Parent delegates to subagent, aggregates result");
+    println!("=========================================================");
+    println!("  Turn 0: Parent → subagent tool call（委派「计算 2+2」）");
+    println!("          Child agent loop（独立上下文）→「结果为 4」");
+    println!("          Child toolset 含递归 subagent 工具（嵌套委派）");
+    println!("  Turn 1: Parent 汇总 → {}", final_answer);
     println!("=========================================================");
     println!();
 }
