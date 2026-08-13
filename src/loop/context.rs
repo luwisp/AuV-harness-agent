@@ -130,7 +130,7 @@ impl ContextBuilder {
 
 /// 默认系统提示词（角色说明文件未配置时使用）。
 pub fn default_system_prompt() -> String {
-    r#"You are AuV harness agent, an AI coding assistant that helps users with software development tasks.
+    r#"You are AuV harness agent, an AI coding assistant running inside AuV that helps users with software development tasks.
 
 You have access to a set of tools that you can use to read, write, and edit files,
 run shell commands, search the codebase, and execute tests.
@@ -259,6 +259,7 @@ mod tests {
         let prompt = super::default_system_prompt();
         assert!(!prompt.is_empty());
         assert!(prompt.contains("AuV harness agent"));
+        assert!(prompt.contains("running inside AuV"));
         assert!(prompt.contains("FINAL ANSWER"));
     }
 
