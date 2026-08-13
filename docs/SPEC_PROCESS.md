@@ -38,7 +38,7 @@
 
 ### 已做修订
 
-本次没有修改 `SPEC.md`。确认的问题集中在 `PLAN.md`，因此只修订了 `docs/superpowers/PLAN.md`。
+本次没有修改 `SPEC.md`。确认的问题集中在 `PLAN.md`，因此只修订了 `docs/PLAN.md`。
 
 #### PLAN 中的 Cargo 目标名称
 

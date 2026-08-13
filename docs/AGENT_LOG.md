@@ -1,10 +1,5 @@
 # AGENT_LOG（Agent 工作日志）
 
-> AI4SE 课程交付物：AuV harness agent 项目开发全过程的 Agent 工作日志。
-> 记录时间：2026-07-08 至 2026-08-14（SPEC 制定 → 核心实现 → REPL/TUI/护栏迭代 → 数据收纳）。
-> 对应文档：[SPEC.md](SPEC.md) ｜ [PLAN.md](PLAN.md) ｜ [SPEC_PROCESS.md](SPEC_PROCESS.md) ｜ [REFLECTION.md](REFLECTION.md)
-
----
 
 ## 总览
 
@@ -34,7 +29,7 @@
 
 **任务**：执行 PLAN 的冷启动验证（Task 1-2），发现两处步骤级缺陷：模块布局冲突（`src/types/mod.rs` 与 `src/types.rs` 冲突）与 Cargo 目标声明缺失。暂停向用户提问，确认混合模块布局方案后修订 PLAN。
 
-**产出**：`docs/superpowers/SPEC_PROCESS.md` 冷启动验证记录。
+**产出**：`docs/SPEC_PROCESS.md` 冷启动验证记录。
 
 ### 条目 3｜2026-07-09 阶段 1-14 全部落地
 
