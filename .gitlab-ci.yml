@@ -1,0 +1,33 @@
+stages:
+  - test
+  - build
+
+default:
+  image: rust:1.88
+  cache:
+    key: cargo-${CI_COMMIT_REF_SLUG}
+    paths:
+      - target/
+      - .cargo/
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: "always"
+
+unit-test:
+  stage: test
+  script:
+    - cargo test --all-targets --locked --verbose -- --test-threads=1
+    - cargo test --doc --locked
+
+release-build:
+  stage: build
+  needs: [unit-test]
+  script:
+    - cargo build --release --locked
+    - ./target/release/auv --version
+  artifacts:
+    name: auv-linux-x86_64-gnu
+    paths:
+      - target/release/auv
+    expire_in: 14 days

@@ -11,8 +11,11 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const SERVICE_NAME: &str = "harness-agent";
 const FALLBACK_FILE: &str = "credentials.enc";
@@ -140,6 +143,10 @@ fn write_encrypted_file(map: &HashMap<String, String>) -> Result<()> {
         }
     };
 
+    write_encrypted_file_at(&path, map)
+}
+
+fn write_encrypted_file_at(path: &std::path::Path, map: &HashMap<String, String>) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -159,9 +166,22 @@ fn write_encrypted_file(map: &HashMap<String, String>) -> Result<()> {
         HarnessError::Credential(format!("Failed to serialize encrypted data: {}", e))
     })?;
 
-    let mut file = fs::File::create(&path).map_err(|e| {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(&path).map_err(|e| {
         HarnessError::Credential(format!(
             "Failed to create encrypted file {:?}: {}",
+            path, e
+        ))
+    })?;
+
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+        HarnessError::Credential(format!(
+            "Failed to restrict encrypted file permissions {:?}: {}",
             path, e
         ))
     })?;
@@ -212,13 +232,12 @@ impl Default for KeyringCredentialBackend {
 
 /// Check if the system keyring is available by attempting to create a test entry.
 fn check_keyring_available() -> bool {
-    let entry = keyring::Entry::new(SERVICE_NAME, "__harness_probe__");
-    match entry {
-        Ok(_) => {
-            // Try to set a test value to verify the keyring works
-            // We don't actually set it — just creating the entry is a good signal
-            true
-        }
+    let Ok(entry) = keyring::Entry::new(SERVICE_NAME, "__harness_probe__") else {
+        return false;
+    };
+
+    match entry.get_password() {
+        Ok(_) | Err(keyring::Error::NoEntry) => true,
         Err(_) => false,
     }
 }
@@ -284,11 +303,16 @@ impl CredentialBackend for KeyringCredentialBackend {
 
     fn list_keys(&self) -> Result<Vec<String>> {
         if self.keyring_available {
-            // The keyring crate doesn't support listing keys. Fall back to
-            // the encrypted file for listing, which serves as a secondary
-            // index of known keys.
             let map = read_encrypted_file().unwrap_or_default();
             let mut keys: Vec<String> = map.keys().cloned().collect();
+            for key in ["OPENAI_API_KEY", "openai_api_key"] {
+                let is_present = keyring::Entry::new(SERVICE_NAME, key)
+                    .and_then(|entry| entry.get_password())
+                    .is_ok();
+                if is_present && !keys.iter().any(|known| known == key) {
+                    keys.push(key.to_string());
+                }
+            }
             keys.sort();
             Ok(keys)
         } else {
@@ -336,5 +360,18 @@ mod tests {
         let encrypted = encrypt_value("").unwrap();
         let decrypted = decrypt_value(&encrypted).unwrap();
         assert_eq!(decrypted, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_encrypted_file_permissions_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.enc");
+        let map = HashMap::from([("OPENAI_API_KEY".to_string(), "test-secret".to_string())]);
+
+        write_encrypted_file_at(&path, &map).unwrap();
+
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

@@ -149,8 +149,8 @@ async fn main() -> Result<()> {
             print_notices(&notices);
             let workspace = std::env::current_dir()?;
 
-            // Resolve API key from config or env
-            let api_key = resolve_api_key(&config)?;
+            // Resolve API key from config, env, or secure credential storage.
+            let api_key = resolve_api_key(&config).await?;
 
             if no_tui || !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
                 // CLI mode — no events needed
@@ -389,7 +389,7 @@ async fn run_repl(
     resume: bool,
     notices: Vec<String>,
 ) -> Result<()> {
-    let api_key = resolve_api_key(&config)?;
+    let api_key = resolve_api_key(&config).await?;
 
     // 创建事件通道，用于实时显示本轮消息（assistant 块、工具结果）。
     // tx 保留克隆：/model 切换模型时需要用同一通道重建 agent。
@@ -1620,21 +1620,59 @@ fn print_notices(notices: &[String]) {
 // resolve_api_key
 // ============================================================================
 
-/// Resolve the API key to use, checking config first, then the `OPENAI_API_KEY`
-/// environment variable.
-fn resolve_api_key(config: &HarnessConfig) -> Result<String> {
-    if let Some(ref key) = config.llm.api_key {
-        return Ok(key.clone());
-    }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+/// Resolve the API key from config, environment, then secure credential storage.
+async fn resolve_api_key(config: &HarnessConfig) -> Result<String> {
+    if let Some(key) = resolve_api_key_without_vault(config)? {
         return Ok(key);
+    }
+    let manager = make_credential_manager();
+    resolve_api_key_with_manager(config, &manager).await
+}
+
+async fn resolve_api_key_with_manager(
+    config: &HarnessConfig,
+    manager: &CredentialManager,
+) -> Result<String> {
+    if let Some(key) = resolve_api_key_without_vault(config)? {
+        return Ok(key);
+    }
+    for name in ["OPENAI_API_KEY", "openai_api_key"] {
+        if let Some(key) = manager.get(name).await? {
+            return Ok(key);
+        }
     }
     Err(harness_agent::error::HarnessError::Auth(
         "No API key found. Set it in config.toml under [llm].api_key, \
-         or set the OPENAI_API_KEY environment variable. \
-         Run `auv key set` to store it in the env file."
+         set OPENAI_API_KEY_FILE or OPENAI_API_KEY, \
+         Run `auv key set` and use the name OPENAI_API_KEY to store it securely."
             .to_string(),
     ))
+}
+
+fn resolve_api_key_without_vault(config: &HarnessConfig) -> Result<Option<String>> {
+    if let Some(ref key) = config.llm.api_key {
+        return Ok(Some(key.clone()));
+    }
+    if let Ok(path) = std::env::var("OPENAI_API_KEY_FILE") {
+        let key = std::fs::read_to_string(&path).map_err(|e| {
+            harness_agent::error::HarnessError::Auth(format!(
+                "Failed to read OPENAI_API_KEY_FILE '{}': {}",
+                path, e
+            ))
+        })?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(harness_agent::error::HarnessError::Auth(format!(
+                "OPENAI_API_KEY_FILE '{}' is empty",
+                path
+            )));
+        }
+        return Ok(Some(key.to_string()));
+    }
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        return Ok(Some(key));
+    }
+    Ok(None)
 }
 
 // ============================================================================
@@ -1916,7 +1954,41 @@ async fn run_key_clear(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use clap::Parser;
+    use harness_agent::credentials::CredentialBackend;
+    use std::collections::HashMap;
+
+    struct TestCredentialBackend {
+        values: HashMap<String, String>,
+    }
+
+    #[async_trait]
+    impl CredentialBackend for TestCredentialBackend {
+        async fn get(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.values.get(key).cloned())
+        }
+
+        async fn set(&self, _key: &str, _value: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_keys(&self) -> Result<Vec<String>> {
+            Ok(self.values.keys().cloned().collect())
+        }
+    }
+
+    fn test_credential_manager(entries: &[(&str, &str)]) -> CredentialManager {
+        let values = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        CredentialManager::new(Box::new(TestCredentialBackend { values }))
+    }
 
     // -----------------------------------------------------------------------
     // Helper: parse CLI args from a string
@@ -2371,40 +2443,70 @@ mod tests {
     // resolve_api_key tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_resolve_api_key_from_config() {
+    #[tokio::test]
+    async fn test_resolve_api_key_from_config() {
         let mut config = HarnessConfig::default();
         config.llm.api_key = Some("sk-config-key".to_string());
-        let key = resolve_api_key(&config).unwrap();
+        let manager = test_credential_manager(&[("OPENAI_API_KEY", "sk-stored-key")]);
+        let key = resolve_api_key_with_manager(&config, &manager).await.unwrap();
         assert_eq!(key, "sk-config-key");
     }
 
-    #[test]
-    fn test_resolve_api_key_from_env() {
+    #[tokio::test]
+    async fn test_resolve_api_key_from_env() {
         let config = HarnessConfig::default();
+        unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-env-key") };
-        let key = resolve_api_key(&config).unwrap();
+        let manager = test_credential_manager(&[("OPENAI_API_KEY", "sk-stored-key")]);
+        let key = resolve_api_key_with_manager(&config, &manager).await.unwrap();
         assert_eq!(key, "sk-env-key");
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
     }
 
-    #[test]
-    fn test_resolve_api_key_config_priority() {
+    #[tokio::test]
+    async fn test_resolve_api_key_config_priority() {
         let mut config = HarnessConfig::default();
         config.llm.api_key = Some("sk-config-key".to_string());
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-env-key") };
         // Config should take priority
-        let key = resolve_api_key(&config).unwrap();
+        let manager = test_credential_manager(&[("OPENAI_API_KEY", "sk-stored-key")]);
+        let key = resolve_api_key_with_manager(&config, &manager).await.unwrap();
         assert_eq!(key, "sk-config-key");
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
     }
 
-    #[test]
-    fn test_resolve_api_key_missing() {
+    #[tokio::test]
+    async fn test_resolve_api_key_from_secure_storage() {
+        let config = HarnessConfig::default();
+        unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        let manager = test_credential_manager(&[("OPENAI_API_KEY", "sk-stored-key")]);
+        let key = resolve_api_key_with_manager(&config, &manager).await.unwrap();
+        assert_eq!(key, "sk-stored-key");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_api_key_from_file() {
+        let config = HarnessConfig::default();
+        let key_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(key_file.path(), "sk-file-key\n").unwrap();
+        unsafe { std::env::set_var("OPENAI_API_KEY_FILE", key_file.path()) };
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-env-key") };
+        let manager = test_credential_manager(&[("OPENAI_API_KEY", "sk-stored-key")]);
+        let key = resolve_api_key_with_manager(&config, &manager).await.unwrap();
+        assert_eq!(key, "sk-file-key");
+        unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+    }
+
+    #[tokio::test]
+    async fn test_resolve_api_key_missing() {
         let config = HarnessConfig::default();
         // Ensure env var is not set
+        unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
-        let result = resolve_api_key(&config);
+        let manager = test_credential_manager(&[]);
+        let result = resolve_api_key_with_manager(&config, &manager).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             harness_agent::error::HarnessError::Auth(msg) => {

@@ -161,11 +161,13 @@ Action → [静态规则] → [风险评估] → [沙箱校验] → [审批状�
 
 ### 3.12 凭据管理
 
-- **主方案**：配置文件存储——`~/.AuV/config.toml`（全局）与 `./.AuV/config.toml`（项目）中的 `[llm] api_key` 字段；`./.AuV/` 与 `config.toml` 已加入 `.gitignore`，绝不入库
-- **备选方案**：环境变量（如 `DEEPSEEK_API_KEY`），优先级低于配置文件
-- **OS 钥匙串**：`credentials/` 模块保留 keyring 后端（Linux Secret Service / macOS Keychain / Windows Credential Manager），当前版本未作为默认路径启用
+- **主方案**：`auv key set` 隐藏输入后写入 OS 钥匙串；后端不可访问时降级到权限为 `0600` 的 AES-256-GCM 加密文件
+- **容器方案**：只读挂载 secret file，并通过 `OPENAI_API_KEY_FILE` 传递文件路径；key 不进入镜像、命令行或进程环境
+- **兼容方案**：两级配置 `[llm] api_key` 与 `OPENAI_API_KEY` 环境变量；二者均为明文来源，需明确风险
+- **读取优先级**：配置文件 → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储
+- **回退边界**：加密文件使用 machine-id 派生密钥，只防止意外明文泄漏，不能抵御已取得同机 machine-id 与用户文件读取权限的攻击者
 - **首次录入**：`auv init` 交互式引导（隐藏输入），创建配置目录与文件
-- **威胁模型**：key 绝不硬编码、不提交 git（`config.toml` 在 `.gitignore` 中）、不写入日志、不进入 shell history。项目中无任何硬编码 key
+- **威胁模型**：key 绝不硬编码、不提交 git（`config.toml`、`.env`、`.AuV/` 在忽略列表中）、不写入日志；文档不提供含真实 key 的命令行示例
 
 ---
 
@@ -467,11 +469,11 @@ pub struct TraceEntry {
 ### 7.2 安全（凭据威胁模型）
 
 - **威胁**：key 泄露（硬编码、git 提交、日志记录、shell history）
-- **对策**：key 仅通过 OS 钥匙串或加密文件存储；`.env` 文件需用户确认风险；代码中无任何硬编码 key；git pre-commit hook 扫描敏感模式
+- **对策**：优先使用 OS 钥匙串、加密文件或只读 secret file；`.env`/配置文件需用户确认明文风险；代码中无任何硬编码 key；发布前扫描工作树与 Git 历史
 - **威胁**：进程环境变量暴露
-- **对策**：key 从钥匙串按需读取后立即注入内存，不通过环境变量传递
+- **对策**：容器通过 `OPENAI_API_KEY_FILE` 读取只读 secret file；环境变量仅作为兼容入口并明确风险
 - **威胁**：中间人攻击
-- **对策**：所有 LLM API 调用强制 HTTPS
+- **对策**：默认远端服务使用 HTTPS；本地 Ollama/vLLM 可显式配置回环 HTTP。当前版本不会阻止自定义远端 HTTP URL，使用者需自行确认受信网络边界
 
 ### 7.3 可用性
 
@@ -491,18 +493,19 @@ pub struct TraceEntry {
 
 ### 8.1 Key 存储方案
 
-- **主方案**：两级配置文件 `[llm] api_key` 字段——全局 `~/.AuV/config.toml`、项目 `./.AuV/config.toml`；两者均已加入 `.gitignore`，绝不入库
-- **备选方案**：环境变量（优先级低于配置文件）
-- **预留方案**：OS 钥匙串（`keyring` crate，Linux Secret Service / macOS Keychain / Windows Credential Manager），`credentials/` 模块已实现后端，当前版本未启用
+- **主方案**：`auv key set` 使用 OS 钥匙串；不可用时降级到权限为 `0600` 的 AES-256-GCM 加密文件
+- **容器方案**：只读挂载 secret file，设置 `OPENAI_API_KEY_FILE` 为容器内文件路径
+- **兼容方案**：两级配置 `[llm] api_key` 或 `OPENAI_API_KEY`；两者均为明文来源
+- **读取优先级**：配置文件 → secret file → 环境变量 → 安全存储
 
 ### 8.2 Key 录入 / 更新 / 清除
 
 ```bash
 auv init               # 交互式初始化（创建配置 + 隐藏输入录入 key）
-# 或直接编辑配置文件 / 设置环境变量
+auv key set            # key 名称使用 OPENAI_API_KEY
+auv key status         # 只显示已配置状态，不回显明文
+auv key clear OPENAI_API_KEY
 ```
-
-> 与原设计的差异说明：原计划以 OS 钥匙串为主方案，实现中发现课程演示与 CI 环境下钥匙串可用性不稳定（无桌面环境时 Secret Service 不可用），且配置文件方案与"两级配置 + 幂等启动"架构更契合，故交付版本以配置文件为主方案，钥匙串后端保留为预留。
 
 ### 8.3 分发形态
 
@@ -511,8 +514,10 @@ auv init               # 交互式初始化（创建配置 + 隐藏输入录入 
 - CI（GitHub Actions）中构建 release 版本
 
 **Docker 分发**（辅助）：
-- 多阶段构建：`rust:1.85-alpine` 构建 + `alpine:3.21` 运行
-- `docker build -t auv . && docker run -it auv`
+- 多阶段构建：`rust:1.88-alpine` 构建 + `alpine:3.21` 运行（当前锁文件 MSRV 为 Rust 1.88）
+- 本地：`docker build -t auv-harness-agent . && docker run --rm -it auv-harness-agent`
+- Registry：`ghcr.io/luwisp/auv-harness-agent`，主分支生成 `master`/`main` 标签，`v*` 发布生成语义版本与 `latest`
+- 发布镜像为 `linux/amd64` 精简运行层，不内置项目语言工具链；Rust 反馈命令需使用原生二进制或派生开发镜像
 
 **目标平台**：Linux x86_64（主要测试平台）、macOS ARM64（可编译，未充分测试）
 
@@ -526,7 +531,7 @@ auv init               # 交互式初始化（创建配置 + 隐藏输入录入 
 | **OpenAI 兼容 API**（实际） | Chat Completions API 的 tool_calls 格式成熟，第三方服务（DeepSeek、Groq、Ollama）广泛兼容；实现含 DeepSeek 思考模式 `reasoning_content` 回传 |
 | **Anthropic API**（预留） | 原计划预留接口；实现聚焦 OpenAI 兼容层后未落地（见 §12 Stretch Goals） |
 | **`reqwest`** | Rust 生态最成熟的 HTTP 客户端 |
-| **`keyring`** | 跨平台 OS 钥匙串抽象（预留后端，未启用） |
+| **`keyring`** | 跨平台 OS 钥匙串抽象，Agent 启动时可直接读取已录入的 key |
 | **`serde` + `serde_json`** | JSON Schema 生成与解析 |
 | **`tokio`** | 异步运行时，支持并发 LLM 调用和子 agent |
 | **`clap`** | CLI 参数解析 |

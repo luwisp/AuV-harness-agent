@@ -14,6 +14,7 @@
 - [6. 护栏系统](#6-护栏系统)
 - [7. 目录结构](#7-目录结构)
 - [8. 开发与测试](#8-开发与测试)
+- [9. CI/CD 与发布](#9-cicd-与发布)
 - [已知限制](#已知限制)
 
 ---
@@ -155,7 +156,7 @@ auv run --no-tui "运行 cargo test 并修复失败的测试"
 
 ### 前置条件
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.88+ (edition 2024；当前锁文件中的依赖要求至少 1.88)
 - OpenAI API Key，或任何兼容 OpenAI 接口的服务（DeepSeek、Groq、Ollama、vLLM 等）
 
 ### 三步启动
@@ -178,17 +179,55 @@ cargo build --release
 ### 从源码构建
 
 ```bash
-git clone <repo-url>
-cd harnessAgent
-cargo build --release
+git clone git@github.com:luwisp/AuV-harness-agent.git
+cd AuV-harness-agent
+cargo build --release --locked
 ./target/release/auv --help
 ```
 
 ### Docker
 
+本地构建并启动：
+
 ```bash
 docker build -t auv-harness-agent .
-docker run -it auv-harness-agent
+docker run --rm -it \
+  --mount type=bind,src="$PWD",dst=/workspace \
+  auv-harness-agent
+```
+
+也可以从 GHCR 获取公开镜像。`master` 随主分支更新，`latest` 随 `v*` Release 标签更新：
+
+```bash
+docker pull ghcr.io/luwisp/auv-harness-agent:master
+docker run --rm ghcr.io/luwisp/auv-harness-agent:master --version
+```
+
+容器中推荐用只读 secret file 提供 key。以下命令不会把 key 写进镜像、命令行或进程环境：
+
+```bash
+mkdir -p "$HOME/.config/auv"
+chmod 700 "$HOME/.config/auv"
+touch "$HOME/.config/auv/openai-api-key"
+chmod 600 "$HOME/.config/auv/openai-api-key"
+# 用编辑器把 key 写入上面的文件，不要在命令行中直接写 key。
+
+docker run --rm -it \
+  --mount type=bind,src="$PWD",dst=/workspace \
+  --mount type=bind,src="$HOME/.config/auv/openai-api-key",dst=/run/secrets/openai_api_key,readonly \
+  -e OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
+  ghcr.io/luwisp/auv-harness-agent:master
+```
+
+访问宿主机 Ollama 时，Linux Docker 还需加 `--network host`；Docker Desktop 请把 `base_url` 中的 `localhost` 改为 `host.docker.internal`。
+
+### GitHub Release 二进制
+
+推送 `v*` 标签后，发布流水线会在 [GitHub Releases](https://github.com/luwisp/AuV-harness-agent/releases) 生成 Linux x86_64 GNU 二进制及 SHA-256 校验文件。该二进制未做代码签名；下载后先核对校验和，再赋予执行权限：
+
+```bash
+sha256sum -c auv-v*-SHA256SUMS
+chmod +x auv-v*-x86_64-unknown-linux-gnu
 ```
 
 ### 初始化
@@ -228,15 +267,19 @@ auv key set          # 交互式录入（隐藏回显）
 auv key clear <名称>  # 删除存储的 key
 ```
 
-存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到 AES-256-GCM 加密文件。
+存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到权限为 `0600` 的 AES-256-GCM 加密文件。该回退密钥由机器标识派生，可防止凭据明文落盘，但不能抵御已能读取同机 machine-id 与用户文件的攻击者；无桌面环境优先使用权限受控的 secret file。
+
+录入时 key 名称请使用 `OPENAI_API_KEY`。Agent 的读取优先级为：配置文件 `[llm] api_key` → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储。推荐交互式 `auv key set`；容器推荐 `OPENAI_API_KEY_FILE`。
 
 ### 设置 API Key 的其他方式
 
 除了 `auv key set`，也可以：
 
 ```bash
-# 环境变量（优先级低于 ./.AuV/config.toml）
-export OPENAI_API_KEY="sk-your-key"
+# 明文环境变量会暴露给同一用户下可读取进程环境的程序，仅适合临时开发。
+# 为避免 key 进入 shell history，请在隐藏输入后导出。
+read -rsp "OPENAI_API_KEY: " OPENAI_API_KEY && echo
+export OPENAI_API_KEY
 ```
 
 ```toml
@@ -477,8 +520,9 @@ harnessAgent/
 ## 8. 开发与测试
 
 ```bash
-# 运行所有 425 个测试（不依赖网络，全部用 mock LLM）
-cargo test
+# 运行全部确定性测试（不依赖真实 LLM API）
+cargo test --all-targets --locked -- --test-threads=1
+cargo test --doc --locked
 
 # 运行机制演示
 cargo test --test mechanism_demo
@@ -492,9 +536,25 @@ RUST_LOG=debug cargo run
 
 ---
 
+## 9. CI/CD 与发布
+
+- `.github/workflows/ci.yml` 在每次 push、pull request 和手动触发时运行全目标编译检查、Clippy、全部测试、release 构建与 Docker 构建/烟雾测试。Clippy 当前作为建议项输出既有 lint 债务，不使用 `-D warnings` 阻断交付。
+- CI 通过后可下载 `auv-linux-x86_64-gnu` 构建产物，保留 14 天。
+- `.github/workflows/publish.yml` 先重跑确定性测试，再在 `master`/`main` 更新时推送 GHCR 分支标签；`v*` 标签会额外推送语义版本与 `latest`，并创建 GitHub Release 二进制。
+- `.gitlab-ci.yml` 提供课程交付要求的 `unit-test` job 与 release 构建产物。
+
+首次发布 GHCR 包后，需要在 GitHub package settings 中将 package visibility 设为 Public，公开拉取命令才无需登录。
+
+---
+
 ## 已知限制
 
 - **LSP 诊断**：降级为解析 `cargo check` 输出，未实现完整 LSP 协议。
 - **Linux 钥匙串**：需 `gnome-keyring` 或 `kwallet`，无桌面环境自动降级到加密文件。
+- **加密文件回退**：使用 machine-id 派生密钥且文件权限为 `0600`，主要防止意外明文泄漏，不等价于带独立主密码的凭据库。
 - **平台**：主要测试 Linux x86_64；macOS ARM64 可编译但未充分测试。
+- **容器平台**：发布流水线当前只构建 `linux/amd64`；运行镜像约 45 MB，不包含 Rust 或其他项目语言工具链。Agent 可执行 shell/git 与基础文件操作，但 `cargo test/check/clippy` 反馈需要在自定义派生镜像中安装 Rust，或使用原生二进制运行。
+- **容器凭据**：容器无桌面 Secret Service，推荐只读挂载 secret file；把 `OPENAI_API_KEY` 直接写在 `docker run -e` 后会进入 shell history，应避免。
+- **二进制签名**：GitHub Release 的 Linux 二进制当前未签名，只提供 SHA-256 校验文件。
+- **自定义 API 传输**：默认远端端点使用 HTTPS；为兼容本地 Ollama/vLLM，当前不会禁止自定义 HTTP URL。非回环地址应只配置 HTTPS。
 - **流式输出**：LLM 响应不是流式的，大任务时等待时间较长。

@@ -1,6 +1,25 @@
 target/
 .git/
-.memory/
+.github/
+
+# Local agent state and credentials must never enter the build context.
+.AuV/
 .harness/
+.memory/
 .env
+.env.*
+config.toml
+*.key
+*.pem
+
+# Development-only agent metadata.
+.agents/
+.claude/
+.codex/
+.superpowers/
+
+# The release image is built only from Cargo files and src/.
+doc/
+docs/
+tests/
 *.md

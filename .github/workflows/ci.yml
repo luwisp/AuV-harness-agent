@@ -1,10 +1,82 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  unit-test:
+  quality:
+    name: Check and Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --verbose
-      - run: cargo build --release
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check all targets
+        run: cargo check --all-targets --all-features --locked
+      - name: Run Clippy (advisory)
+        run: cargo clippy --all-targets --all-features --locked
+
+  unit-test:
+    name: Unit and mechanism tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Run all targets
+        run: cargo test --all-targets --locked --verbose -- --test-threads=1
+      - name: Run documentation tests
+        run: cargo test --doc --locked
+
+  release-build:
+    name: Linux release binary
+    needs: [quality, unit-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Smoke-test binary
+        run: ./target/release/auv --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auv-linux-x86_64-gnu
+          path: target/release/auv
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-build:
+    name: Docker build and smoke test
+    needs: [quality, unit-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --pull --tag auv-harness-agent:ci .
+      - name: Smoke-test image
+        run: docker run --rm auv-harness-agent:ci --version

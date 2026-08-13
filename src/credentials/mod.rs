@@ -21,6 +21,11 @@ impl CredentialManager {
         Self { backend }
     }
 
+    /// Read a credential without exposing the backend implementation.
+    pub async fn get(&self, key: &str) -> Result<Option<String>> {
+        self.backend.get(key).await
+    }
+
     /// List all configured credential keys without revealing plaintext values.
     pub fn key_status(&self) -> Result<String> {
         let keys = self.backend.list_keys()?;
@@ -40,18 +45,17 @@ impl CredentialManager {
         use std::io::{self, Write};
 
         let mut key_name = String::new();
-        print!("Enter key name: ");
+        print!("Enter key name [OPENAI_API_KEY]: ");
         io::stdout()
             .flush()
             .map_err(|e| HarnessError::Credential(format!("Failed to flush stdout: {}", e)))?;
         io::stdin()
             .read_line(&mut key_name)
             .map_err(|e| HarnessError::Credential(format!("Failed to read key name: {}", e)))?;
-        let key_name = key_name.trim().to_string();
-
-        if key_name.is_empty() {
-            return Err(HarnessError::Credential("Key name cannot be empty".to_string()));
-        }
+        let key_name = match key_name.trim() {
+            "" => "OPENAI_API_KEY".to_string(),
+            value => value.to_string(),
+        };
 
         let password = rpassword::prompt_password(format!("Enter value for '{}': ", key_name))
             .map_err(|e| HarnessError::Credential(format!("Failed to read password: {}", e)))?;
