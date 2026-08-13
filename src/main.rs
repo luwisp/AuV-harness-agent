@@ -1958,6 +1958,15 @@ mod tests {
     use clap::Parser;
     use harness_agent::credentials::CredentialBackend;
     use std::collections::HashMap;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// 进程环境变量（OPENAI_API_KEY / OPENAI_API_KEY_FILE）是共享可变状态，
+    /// 串行化所有 set_var/remove_var 的测试，消除并行竞态。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     struct TestCredentialBackend {
         values: HashMap<String, String>,
@@ -2445,6 +2454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_api_key_from_config() {
+        let _guard = env_lock();
         let mut config = HarnessConfig::default();
         config.llm.api_key = Some("sk-config-key".to_string());
         let manager = test_credential_manager(&[("OPENAI_API_KEY", "sk-stored-key")]);
@@ -2454,6 +2464,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_api_key_from_env() {
+        let _guard = env_lock();
         let config = HarnessConfig::default();
         unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-env-key") };
@@ -2465,6 +2476,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_api_key_config_priority() {
+        let _guard = env_lock();
         let mut config = HarnessConfig::default();
         config.llm.api_key = Some("sk-config-key".to_string());
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-env-key") };
@@ -2477,6 +2489,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_api_key_from_secure_storage() {
+        let _guard = env_lock();
         let config = HarnessConfig::default();
         unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -2487,6 +2500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_api_key_from_file() {
+        let _guard = env_lock();
         let config = HarnessConfig::default();
         let key_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(key_file.path(), "sk-file-key\n").unwrap();
@@ -2501,6 +2515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_api_key_missing() {
+        let _guard = env_lock();
         let config = HarnessConfig::default();
         // Ensure env var is not set
         unsafe { std::env::remove_var("OPENAI_API_KEY_FILE") };
