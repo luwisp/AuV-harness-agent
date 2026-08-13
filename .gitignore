@@ -6,3 +6,6 @@ config.toml
 .claude/
 .harness/
 .AuV/
+.codex/
+.superpowers/
+.agents/
