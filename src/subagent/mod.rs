@@ -151,6 +151,35 @@ impl SubagentSpawner {
 }
 
 // ============================================================================
+// AgentLoopRunner：生产 Runner（工厂闭包构建子 AgentLoop）
+// ============================================================================
+
+/// 生产环境的 runner：通过工厂闭包为每次委派构建独立的子 AgentLoop。
+///
+/// 工厂在 main.rs 装配（捕获配置、API key、审批模式等），子 loop 通过
+/// 传入的**子层** spawner 注册递归 subagent 工具，实现嵌套委派。
+pub struct AgentLoopRunner {
+    factory: Arc<dyn Fn(&SubagentSpawner) -> Result<crate::r#loop::AgentLoop> + Send + Sync>,
+}
+
+impl AgentLoopRunner {
+    pub fn new(
+        factory: Arc<dyn Fn(&SubagentSpawner) -> Result<crate::r#loop::AgentLoop> + Send + Sync>,
+    ) -> Self {
+        Self { factory }
+    }
+}
+
+#[async_trait]
+impl AgentRunner for AgentLoopRunner {
+    async fn run(&self, task: &str, spawner: &SubagentSpawner) -> Result<String> {
+        let mut child_loop = (self.factory)(spawner)?;
+        let (result, _messages) = child_loop.run_with_history(task, &[]).await?;
+        Ok(result)
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -398,5 +427,111 @@ mod tests {
 
         // After all complete, active count should be 0 again
         assert_eq!(spawner2.active_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: AgentLoopRunner
+    // -----------------------------------------------------------------------
+
+    /// 构建一个最小可运行的子 AgentLoop：mock LLM 直接返回最终答案。
+    fn build_minimal_loop(content: &str) -> crate::r#loop::AgentLoop {
+        use crate::feedback::FeedbackRunner;
+        use crate::guardrails::rules::StaticRuleEngine;
+        use crate::guardrails::sandbox::SandboxBoundary;
+        use crate::guardrails::GuardrailPipeline;
+        use crate::llm::mock::MockLlmProvider;
+        use crate::memory::MemoryStore;
+        use crate::r#loop::context::ContextBuilder;
+        use crate::types::{FinishReason, LlmResponse, TokenUsage};
+
+        let mock = MockLlmProvider::new(vec![LlmResponse {
+            content: content.to_string(),
+            reasoning_content: None,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+            tool_calls: None,
+        }]);
+        let rules = StaticRuleEngine::new();
+        let assessors: Vec<Box<dyn crate::guardrails::assessor::RiskAssessor>> = vec![];
+        let sandbox = SandboxBoundary {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            allowed_commands: vec![],
+            forbidden_commands: vec![],
+            max_timeout: std::time::Duration::from_secs(300),
+            network_allowed: true,
+        };
+        let pipeline = GuardrailPipeline::for_testing(rules, assessors, sandbox);
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let memory = MemoryStore::new(tempdir.path().to_path_buf()).expect("memory store");
+        let mut config = crate::config::HarnessConfig::default();
+        config.agent.max_turns = 10;
+        config.agent.token_budget = None;
+
+        crate::r#loop::AgentLoop::new(
+            Box::new(mock),
+            pipeline,
+            crate::tools::ToolRegistry::new(),
+            FeedbackRunner::new(vec![], 0),
+            memory,
+            config,
+            ContextBuilder::new(
+                "You are a test subagent.".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_runner_returns_child_summary() {
+        let runner = AgentLoopRunner::new(Arc::new(|_spawner| {
+            Ok(build_minimal_loop("计算完成：结果为 4"))
+        }));
+        let spawner = SubagentSpawner::new(3, 5, Arc::new(runner));
+        let result = spawner
+            .spawn("计算 2+2", IsolationMode::SameProcess)
+            .await;
+        let subagent_result = result.expect("spawn 应成功");
+        assert!(subagent_result.success);
+        assert_eq!(subagent_result.summary, "计算完成：结果为 4");
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_runner_receives_child_spawner() {
+        // 工厂应收到**子层** spawner（深度 +1），供子 loop 注册递归工具
+        let received_depth = Arc::new(std::sync::Mutex::new(None));
+        let depth_for_closure = Arc::clone(&received_depth);
+        let runner = AgentLoopRunner::new(Arc::new(move |spawner| {
+            *depth_for_closure.lock().unwrap() = Some(spawner.depth());
+            Ok(build_minimal_loop("完成"))
+        }));
+        let spawner = SubagentSpawner::new(3, 5, Arc::new(runner));
+        let result = spawner
+            .spawn("任务", IsolationMode::SameProcess)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(*received_depth.lock().unwrap(), Some(1), "工厂收到的应是深度 1 的子层 spawner");
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_runner_factory_error_becomes_failed_result() {
+        let runner = AgentLoopRunner::new(Arc::new(|_spawner| {
+            Err(HarnessError::Config("工厂构建失败".to_string()))
+        }));
+        let spawner = SubagentSpawner::new(3, 5, Arc::new(runner));
+        let result = spawner
+            .spawn("任务", IsolationMode::SameProcess)
+            .await;
+        let subagent_result = result.expect("spawn 不应传播错误");
+        assert!(!subagent_result.success, "工厂错误应降级为失败结果");
+        assert!(
+            subagent_result.summary.contains("工厂构建失败"),
+            "摘要应包含工厂错误信息：{}",
+            subagent_result.summary
+        );
     }
 }
