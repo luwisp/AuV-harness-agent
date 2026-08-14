@@ -329,6 +329,31 @@ pub fn write_default_config(path: &Path) -> Result<(), crate::error::HarnessErro
     })
 }
 
+/// 创建项目级稀疏覆盖配置。
+///
+/// 项目配置只应包含用户主动覆盖的字段；写入完整默认配置会在后续启动时
+/// 静默遮蔽 `~/.AuV/config.toml` 中的模型与 API 地址。
+pub fn write_project_override_config(path: &Path) -> Result<(), crate::error::HarnessError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::error::HarnessError::Config(format!(
+                "无法创建配置目录 {}：{}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+    let content = "# AuV 项目级配置覆盖。\n\
+# 仅添加需要覆盖 ~/.AuV/config.toml 的字段。\n\
+# 示例：\n\
+# [llm]\n\
+# model = \"deepseek-v4-flash\"\n\
+# base_url = \"https://api.deepseek.com/v1\"\n";
+    std::fs::write(path, content).map_err(|e| {
+        crate::error::HarnessError::Config(format!("无法写入配置文件 {}：{}", path.display(), e))
+    })
+}
+
 /// 读取配置文件为 `toml::Value`（损坏时返回中文错误）。
 fn read_toml_value(path: &Path) -> Result<toml::Value, crate::error::HarnessError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
@@ -372,7 +397,8 @@ pub struct LayeredLoad {
 
 /// 按「全局 → 局部」分层加载配置：
 ///
-/// - 配置文件不存在 → 创建目录并写入默认配置（已存在则绝不改动）
+/// - 全局配置不存在 → 写入完整默认配置（已存在则绝不改动）
+/// - 项目配置不存在 → 写入仅含注释的稀疏覆盖模板
 /// - 局部配置字段级覆盖全局配置
 /// - 旧版项目根 `config.toml` 不再加载（无提示）
 pub fn load_layered(home: &Path, cwd: &Path) -> Result<LayeredLoad, crate::error::HarnessError> {
@@ -395,7 +421,7 @@ pub fn load_layered(home: &Path, cwd: &Path) -> Result<LayeredLoad, crate::error
         if local.exists() {
             merge_toml(&mut merged, read_toml_value(local)?);
         } else {
-            match write_default_config(local) {
+            match write_project_override_config(local) {
                 Ok(()) => notices.push(format!("已创建项目配置：{}", local.display())),
                 Err(e) => notices.push(format!("{}（本次运行使用默认配置）", e)),
             }
@@ -605,6 +631,41 @@ max_depth = 0
             std::fs::read_to_string(home.path().join(".AuV/config.toml")).unwrap(),
             before,
             "已有配置绝不被改动"
+        );
+    }
+
+    #[test]
+    fn test_new_local_config_preserves_global_values_across_reloads() {
+        let home = tempdir();
+        let cwd = tempdir();
+        let global_dir = home.path().join(".AuV");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            "[llm]\nmodel = \"deepseek-v4-flash\"\nbase_url = \"https://api.example.test/v1\"\n",
+        )
+        .unwrap();
+
+        let first = load_layered(home.path(), cwd.path()).unwrap();
+        assert_eq!(first.config.llm.model, "deepseek-v4-flash");
+        assert_eq!(
+            first.config.llm.base_url.as_deref(),
+            Some("https://api.example.test/v1")
+        );
+
+        let local_path = cwd.path().join(".AuV/config.toml");
+        let local = std::fs::read_to_string(&local_path).unwrap();
+        let local_value: toml::Value = toml::from_str(&local).unwrap();
+        assert!(
+            local_value.as_table().is_some_and(toml::map::Map::is_empty),
+            "自动创建的项目覆盖层不得包含生效字段：{local}"
+        );
+
+        let second = load_layered(home.path(), cwd.path()).unwrap();
+        assert_eq!(second.config.llm.model, "deepseek-v4-flash");
+        assert_eq!(
+            second.config.llm.base_url.as_deref(),
+            Some("https://api.example.test/v1")
         );
     }
 

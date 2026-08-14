@@ -1,17 +1,17 @@
 # AuV harness agent — Coding Agent Harness
 
-AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent Harness）：主循环、工具分发、四层治理护栏、反馈闭环、记忆与子 agent 委派均为自研 harness 内核，不依赖任何现成 agent 框架。全部核心机制由 mock LLM 驱动、可离线确定性测试（当前 478 项测试全通过、零编译警告），并配有一键复现的机制演示。支持交互式 REPL、可视化 TUI、纯文本三种运行方式。
+AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent Harness）：主循环、工具分发、四层治理护栏、反馈闭环、记忆与子 agent 委派均为自研 harness 内核，不依赖任何现成 agent 框架。全部核心机制由 mock LLM 驱动、可离线确定性测试（当前 480 项测试全通过、零编译警告），并配有一键复现的机制演示。支持交互式 REPL、可视化 TUI、纯文本三种运行方式。
 
 **核心机制速览**
 
 | 机制 | 说明 |
 |------|------|
-| 四层护栏 | 静态规则 → 风险评估 → 人工审批 → 沙箱边界，危险操作在工具执行前被拦截，全部决策写入审计日志 |
+| 四层护栏 | 静态规则 → 风险评估 → 沙箱边界 → 人工审批，危险操作在工具执行前被拦截，全部决策写入审计日志 |
 | 反馈闭环 | 工具产出经测试/静态检查校验，失败结果注入下一轮上下文，驱动 agent 自我修正 |
 | 子 agent 委派 | `subagent` 工具把任务委派给独立上下文的子 agent，深度传播限制递归，审批路由回父界面 |
 | 规则与技能 | `rules.md` 声明式规则注入 system prompt；`.skills/` 技能按需加载 |
-| 记忆 | 文件级持久记忆，多轮对话保持上下文 |
-| 凭据安全 | OS 钥匙串 / AES-256-GCM 加密文件 / secret file 三种存储，密钥绝不明文落盘 |
+| 记忆 | 会话历史可持久化；文件级记忆已接通读取与索引注入，自动写入尚未接通 |
+| 凭据安全 | 推荐 OS 钥匙串 / AES-256-GCM 加密文件 / secret file；兼容读取旧版明文配置 |
 
 ## 目录
 
@@ -35,11 +35,13 @@ AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent 
 - Rust 1.88+（edition 2024；当前锁文件中的依赖要求至少 1.88）
 - 一个 OpenAI 兼容 API 的 key（OpenAI、DeepSeek 等均可）
 
-### 三步启动
+### 从源码三步启动
 
 ```bash
-# 1. 编译
-cargo build --release
+# 1. 获取并编译
+git clone https://github.com/luwisp/AuV-harness-agent.git
+cd AuV-harness-agent
+cargo build --release --locked
 
 # 2. 初始化（首次运行：创建配置 + 引导录入 key，隐藏回显）
 ./target/release/auv init
@@ -48,31 +50,26 @@ cargo build --release
 ./target/release/auv
 ```
 
+DeepSeek、Groq、Ollama 等兼容服务还需在第 3 步前向 `./.AuV/config.toml` 添加对应的 `model` 与 `base_url`，见[使用兼容 API](#使用兼容-api-deepseek--groq--ollama--vllm)。项目模板默认不覆盖全局配置。
+
 单次任务也可以直接一句话：
 
 ```bash
 ./target/release/auv run "运行 cargo test 并修复失败的测试"
 ```
 
-### 获取方式（三选一）
+### Docker
 
-**从源码构建**
-
-```bash
-git clone git@github.com:luwisp/AuV-harness-agent.git
-cd AuV-harness-agent
-cargo build --release --locked
-./target/release/auv --help
-```
-
-**Docker**（本地构建或 GHCR 公开镜像；`main` 随主分支更新，`latest` 随 `v*` Release 标签更新）：
+直接使用已发布的 GHCR 镜像（`0.1.0` 为固定版本；`latest` 随 `v*` Release 标签更新）：
 
 ```bash
-docker build -t auv-harness-agent .
+docker pull ghcr.io/luwisp/auv-harness-agent:0.1.0
 docker run --rm -it \
   --mount type=bind,src="$PWD",dst=/workspace \
-  auv-harness-agent
+  ghcr.io/luwisp/auv-harness-agent:0.1.0
 ```
+
+也可以在仓库根目录本地构建：`docker build -t auv-harness-agent .`，并将上面最后一行镜像名替换为 `auv-harness-agent`。
 
 容器中推荐用只读 secret file 提供 key（不把 key 写进镜像、命令行或进程环境）：
 
@@ -85,16 +82,21 @@ docker run --rm -it \
   --mount type=bind,src="$PWD",dst=/workspace \
   --mount type=bind,src="$HOME/.config/auv/openai-api-key",dst=/run/secrets/openai_api_key,readonly \
   -e OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
-  auv-harness-agent
+  ghcr.io/luwisp/auv-harness-agent:0.1.0
 ```
 
 访问宿主机 Ollama 时，Linux Docker 还需加 `--network host`；Docker Desktop 请把 `base_url` 中的 `localhost` 改为 `host.docker.internal`。
 
-**GitHub Release 二进制**：推送 `v*` 标签后，发布流水线会在 [GitHub Releases](https://github.com/luwisp/AuV-harness-agent/releases) 生成 Linux x86_64 GNU 二进制及 SHA-256 校验文件（未做代码签名）：
+### GitHub Release 二进制
+
+[v0.1.0 Release](https://github.com/luwisp/AuV-harness-agent/releases/tag/v0.1.0) 已提供 Linux x86_64 GNU 二进制及 SHA-256 校验文件（未做代码签名）：
 
 ```bash
-sha256sum -c auv-v*-SHA256SUMS
-chmod +x auv-v*-x86_64-unknown-linux-gnu
+curl -LO https://github.com/luwisp/AuV-harness-agent/releases/download/v0.1.0/auv-v0.1.0-x86_64-unknown-linux-gnu
+curl -LO https://github.com/luwisp/AuV-harness-agent/releases/download/v0.1.0/auv-v0.1.0-SHA256SUMS
+sha256sum -c auv-v0.1.0-SHA256SUMS
+chmod +x auv-v0.1.0-x86_64-unknown-linux-gnu
+./auv-v0.1.0-x86_64-unknown-linux-gnu --version
 ```
 
 ---
@@ -114,9 +116,9 @@ AI4SE 期末项目提交清单（课程通用要求 §五 + A 类项目额外要
 | 7. CI/CD 执行记录（最后一次须为 pass） | GitHub Actions：https://github.com/luwisp/AuV-harness-agent/actions |
 | 8. `REFLECTION.md`（1500–2500 字反思报告） | `docs/REFLECTION.md` |
 | 9. 线上部署 URL（WebUI 接口） | 不适用：本项目为 CLI/TUI 形态，SPEC 决策已移除 Web 仪表盘 |
-| 机制演示（A 类项目额外要求 §A.6） | `tests/mechanism_demo.rs`（四项，运行方式见[机制演示](#机制演示)） |
+| 机制演示（A 类项目额外要求 §A.6） | `tests/mechanism_demo.rs`（四项，运行方式见 [机制演示](#机制演示) ） |
 
-课程项目要求原文（通用要求 + A 类项目说明）位于 `doc/` 目录。
+课程要求原文仅保存在开发者本机的 `doc/`，该目录被 `.gitignore` 排除，不属于 GitHub/Release 交付物；公开验收请以本表列出的 `README.md`、`docs/`、源码与 CI 记录为准。
 
 ---
 
@@ -125,8 +127,8 @@ AI4SE 期末项目提交清单（课程通用要求 §五 + A 类项目额外要
 | 模式 | 命令 | 适用场景 |
 |------|------|---------|
 | 交互式 REPL | `auv` | 日常使用，多轮对话，持续编码 |
-| 管道TUI 可视化面板 | `auv run "任务"` | 单次任务，可视化查看工具调用与审批 |
-| 管道纯文本 | `auv run --no-tui "任务"` | CI/脚本/管道，不需终端能力 |
+| TUI 可视化面板 | `auv run "任务"` | 单次任务，可视化查看工具调用与审批 |
+| 纯文本模式 | `auv run --no-tui "任务"` | CI/脚本/管道，不需终端能力 |
 
 ### 模式 1：交互式 REPL（推荐日常使用）
 
@@ -160,7 +162,7 @@ auv --resume     # 恢复最近自动保存的会话（完整打印历史）
 - **中文界面**：所有系统提示与护栏信息均为中文
 - 编辑体验：`↑`/`↓` 浏览历史输入（持久化到 `.AuV/repl_history.txt`），`←`/`→` 移动光标，`Ctrl+A`/`Ctrl+E` 跳行首/行尾
 
-### 模式 2：管道TUI 可视化面板
+### 模式 2：TUI 可视化面板
 
 ```bash
 auv run "你的任务"
@@ -193,11 +195,11 @@ auv key set          # 交互式录入（隐藏回显）
 auv key clear <名称>  # 删除存储的 key
 ```
 
-存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到权限 `0600` 的 AES-256-GCM 加密文件（密钥由机器标识派生）。录入时 key 名称请使用 `OPENAI_API_KEY`。Agent 的读取优先级：配置文件 `[llm] api_key` → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储。
+存储方式：优先 OS 钥匙串（Linux Secret Service / macOS Keychain），不可用时自动降级到权限 `0600` 的 AES-256-GCM 加密文件（密钥由机器标识派生）。录入时 key 名称请使用 `OPENAI_API_KEY`。推荐使用 `auv key set`；为兼容旧配置，Agent 仍按 `[llm] api_key` → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储的顺序读取，但 `[llm] api_key` 是明文 TOML 字段，不建议新配置继续使用。
 
 ### 两级配置
 
-启动时自动创建、已存在则绝不改动；项目配置字段级覆盖全局配置：
+启动时自动创建、已存在则绝不改动；全局文件写入完整默认值，项目文件只创建注释式稀疏模板。项目中实际填写的字段会逐字段覆盖全局配置：
 
 | 层级 | 路径 | 作用 |
 |------|------|------|
@@ -216,13 +218,12 @@ auv key clear <名称>  # 删除存储的 key
 
 ### 配置文件参考
 
-`auv init` 会创建 `./.AuV/config.toml`；所有字段都有默认值。常用字段：
+`auv init` 在项目目录创建稀疏的 `./.AuV/config.toml`，不会复制默认模型并遮蔽全局设置。下面是可按需放入全局或项目配置的常用字段；API key 请通过 `auv key set` 或 `OPENAI_API_KEY_FILE` 提供：
 
 ```toml
 [llm]
 model = "gpt-4o"                             # 模型名
 base_url = "https://api.openai.com/v1"       # API 地址（兼容服务改这里）
-api_key = "sk-..."                           # 可选，也可用环境变量 / 安全存储
 timeout_secs = 120
 
 [agent]
@@ -263,8 +264,8 @@ max_total_agents = 10                        # 同时活跃子 agent 数上限
 |------|------|------|------|
 | L1 | 静态规则 | glob 模式匹配，Allow/Deny/Escalate | `rm -rf /` → 直接 Deny |
 | L2 | 风险评估 | 命令/文件/网络三维度打分 | `curl \| bash` → High |
-| L3 | 人工审批 | 风险超过审批力度阈值时暂停，等待 y/n | 审批超时自动拒绝 |
-| L4 | 沙箱边界 | 工作目录限制、命令黑白名单 | 写 `/etc/` → 拒绝 |
+| L3 | 沙箱边界 | 工作目录限制、命令黑白名单 | 写 `/etc/` → 拒绝 |
+| L4 | 人工审批 | 风险超过审批力度阈值时暂停，等待 y/n | 审批超时自动拒绝 |
 
 所有护栏决策写入 `.AuV/audit.jsonl`。审批力度四档（默认「低」）控制「风险等级**低于等于**对应阈值时自动批准命令」：
 
@@ -301,24 +302,24 @@ L1 的 Deny 始终硬拦截，不受力度影响；审批只针对工具调用�
 
 ## 机制演示
 
-四项确定性演示（mock LLM 驱动、离线运行、约 0.00s 完成），覆盖课程 A 类项目 §A.6 要求的机制演示：
+四项确定性演示（mock LLM 驱动、离线运行、约 0.00s 完成）
 
 ```bash
 # 运行全部四项（--nocapture 显示演示横幅）
-cargo test --test mechanism_demo -- --nocapture
+cargo test --test mechanism_demo -- --nocapture --test-threads=1
 
 # 运行单项（逐个展示更清晰）
-cargo test --test mechanism_demo demo_guardrail_intercepts_dangerous_action -- --nocapture
-cargo test --test mechanism_demo demo_feedback_loop_drives_correction -- --nocapture
-cargo test --test mechanism_demo demo_guardrail_pipeline_full_flow -- --nocapture
-cargo test --test mechanism_demo demo_subagent_delegation_aggregates_result -- --nocapture
+cargo test --test mechanism_demo demo_1_guardrail_intercepts_dangerous_action -- --nocapture
+cargo test --test mechanism_demo demo_2_feedback_loop_drives_correction -- --nocapture
+cargo test --test mechanism_demo demo_3_guardrail_pipeline_full_flow -- --nocapture
+cargo test --test mechanism_demo demo_4_subagent_delegation_aggregates_result -- --nocapture
 ```
 
 | 演示 | 内容 |
 |------|------|
 | Demo 1 | 护栏拦截危险动作：`rm -rf /` 在工具执行前被 L1 静态规则拒绝 |
 | Demo 2 | 反馈闭环驱动自我修正：写 bug 代码 → 反馈失败 → 注入上下文 → 修正 |
-| Demo 3 | 护栏管线全流程：四层逐层验证 + `curl \| bash` 走完 L1→L2→L3 超时否决 |
+| Demo 3 | 护栏管线全流程：四层逐层验证 + `curl \| bash` 走完 L1→L2→L3 沙箱放行→L4 审批超时否决 |
 | Demo 4 | 子 agent 委派：父 agent 委派「计算 2+2」→ 子 agent 独立上下文算出结果 → 父汇总 |
 
 ---
@@ -344,7 +345,6 @@ harnessAgent/
 │   └── tui/                 # 终端 UI（ratatui）
 ├── tests/mechanism_demo.rs  # 机制演示测试（4 项）
 ├── docs/                    # 设计文档与计划（SPEC/PLAN/AGENT_LOG/REFLECTION 等）
-├── doc/                     # 课程项目要求原文（通用要求 + A 类项目说明）
 ├── .AuV/config.toml         # 项目局部配置（可选）
 ├── rules.md                 # 规则文件（可选）
 ├── Cargo.toml
@@ -361,7 +361,7 @@ cargo test --all-targets --locked -- --test-threads=1
 cargo test --doc --locked
 
 # 机制演示（带横幅输出）
-cargo test --test mechanism_demo -- --nocapture
+cargo test --test mechanism_demo -- --nocapture --test-threads=1
 
 # 编译 release
 cargo build --release
@@ -391,4 +391,6 @@ cargo build --release
 - **二进制签名**：GitHub Release 的 Linux 二进制当前未签名，只提供 SHA-256 校验文件。
 - **自定义 API 传输**：默认远端端点使用 HTTPS；为兼容本地 Ollama/vLLM，当前不会禁止自定义 HTTP URL。非回环地址应只配置 HTTPS。
 - **流式输出**：LLM 响应不是流式的，大任务时等待时间较长。
+- **文件级记忆写入**：记忆索引读取与 system prompt 注入已启用，但主循环尚未调用 `MemoryStore::write()`；跨轮上下文由会话历史承担，agent 不会自动沉淀新的长期记忆。
+- **旧版明文凭据**：为避免破坏已有配置，`[llm] api_key` 仍可读取且优先级最高；该字段明文落盘，仅作兼容路径，推荐迁移到 `auv key set` 或只读 secret file。
 - **子 agent**：REPL 在子 agent 运行期间无法刷新界面（工具执行同步阻塞）；审批超时后子线程无法强制终止（后台跑完、结果丢弃）；Worktree 隔离未实现。

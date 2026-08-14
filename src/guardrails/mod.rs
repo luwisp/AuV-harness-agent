@@ -154,18 +154,18 @@ pub struct GuardContext {
 ///    returns `Denied`, the pipeline stops immediately.
 /// 2. **Risk assessment** — All registered assessors evaluate the action and
 ///    their results are merged into a single risk level.
-/// 3. **Approval** — If the merged risk level exceeds the auto-approval
+/// 3. **Sandbox** — Hard boundary enforcement that cannot be overridden by
+///    approval.
+/// 4. **Approval** — If the merged risk level exceeds the auto-approval
 ///    threshold of the configured [`ApprovalLevel`], the human-in-the-loop
 ///    approval gate is invoked (default「低」: `High`/`Critical`).
-/// 4. **Sandbox** — Hard boundary enforcement that cannot be overridden by
-///    approval.
 pub struct GuardrailPipeline {
     rules: StaticRuleEngine,
     assessors: Vec<Box<dyn RiskAssessor>>,
     approval: ApprovalGate,
     sandbox: SandboxBoundary,
     audit: AuditLog,
-    /// 审批力度：决定风险评估（L2）达到什么等级才触发人工审批（L3）。
+    /// 审批力度：决定风险评估（L2）达到什么等级才触发人工审批（L4）。
     approval_level: ApprovalLevel,
 }
 
@@ -252,7 +252,7 @@ impl GuardrailPipeline {
             return rule_result;
         }
 
-        // If L1 escalated, seed the risk assessment at High so that L3
+        // If L1 escalated, seed the risk assessment at High so that L4
         // approval is triggered even when no assessors are registered.
         let initial_assessment = if rule_result.needs_approval() {
             tracing::info!(
@@ -566,7 +566,7 @@ mod tests {
         let ctx = test_context();
 
         // rm -rf ~ triggers the "escalate-rm-rf-home" rule → NeedsApproval →
-        // pipeline continues to L3 approval, which times out → Denied
+        // pipeline continues to L4 approval, which times out → Denied
         let result = pipeline.check(&bash_action("rm -rf ~"), &ctx).await;
         assert!(
             result.is_denied(),
@@ -843,7 +843,7 @@ mod tests {
             Box::new(CommandRiskAssessor),
             Box::new(FileRiskAssessor),
         ];
-        // 工作区根设为 /，避免 L4 沙箱在审批判定之前拦截写 /etc 的用例
+        // 工作区根设为 /，避免 L3 沙箱在审批判定之前拦截写 /etc 的用例
         // （沙箱的工作区约束是硬边界，与审批力度无关）
         let sandbox = SandboxBoundary {
             workspace_root: PathBuf::from("/"),

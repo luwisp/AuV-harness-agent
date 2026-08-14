@@ -119,7 +119,7 @@ Action → [静态规则] → [风险评估] → [沙箱校验] → [审批状�
 - **两级配置**（`config.toml`）：LLM、护栏、沙箱、记忆、反馈的所有参数
   - 全局 `~/.AuV/config.toml`：用户级默认值（默认模型、默认审批力度等）
   - 项目 `./.AuV/config.toml`：项目级覆盖（cwd 为 home 目录时跳过）
-  - 启动自动创建（已存在则绝不改动，幂等）；`toml::Value` 字段级递归合并（项目覆盖全局）
+  - 启动自动创建（已存在则绝不改动，幂等）：全局文件写完整默认配置，项目文件写仅含注释的稀疏覆盖模板，避免第二次启动用默认值遮蔽全局模型/API 地址；`toml::Value` 字段级递归合并（项目覆盖全局）
   - `--config <path>` 显式指定时只读单文件；项目根旧版 `config.toml` 不再加载（无提示）
 - **角色说明文件**（`AuV.md`）：两级检测——项目 `./AuV.md` → `./CLAUDE.md` → `./AGENTS.md`，全局 `~/.AuV/AuV.md` → `~/CLAUDE.md` → `~/AGENTS.md`，取第一个存在的文件；追加式叠加（默认提示词 + 全局 + 项目），配置内联 `[agent] system_prompt` 最高优先
 - **`[subagent]` 配置段**：`max_depth = 3`（递归深度上限，根为 0）、`max_total_agents = 10`（同时活跃子 agent 数上限）；缺省时取默认值
@@ -171,7 +171,7 @@ Action → [静态规则] → [风险评估] → [沙箱校验] → [审批状�
 
 - **主方案**：`auv key set` 隐藏输入后写入 OS 钥匙串；后端不可访问时降级到权限为 `0600` 的 AES-256-GCM 加密文件
 - **容器方案**：只读挂载 secret file，并通过 `OPENAI_API_KEY_FILE` 传递文件路径；key 不进入镜像、命令行或进程环境
-- **兼容方案**：两级配置 `[llm] api_key` 与 `OPENAI_API_KEY` 环境变量；二者均为明文来源，需明确风险
+- **兼容方案**：两级配置 `[llm] api_key` 与 `OPENAI_API_KEY` 环境变量；二者均为明文来源，需明确风险。`[llm] api_key` 为避免破坏已有用户配置继续优先读取，但新配置不再推荐
 - **读取优先级**：配置文件 → `OPENAI_API_KEY_FILE` → `OPENAI_API_KEY` → 安全存储
 - **回退边界**：加密文件使用 machine-id 派生密钥，只防止意外明文泄漏，不能抵御已取得同机 machine-id 与用户文件读取权限的攻击者
 - **首次录入**：`auv init` 交互式引导（隐藏输入），创建配置目录与文件
@@ -223,7 +223,7 @@ Action → [静态规则] → [风险评估] → [沙箱校验] → [审批状�
 - **反馈闭环**：`FeedbackRunner` 不依赖 LLM——它执行命令、解析输出、返回结构化结果。测试时用 mock 命令输出。
 - **主循环**：将 `LlmProvider` 替换为 mock，控制模型回复序列，验证循环的完整行为（包含护栏拦截、反馈回灌、停机判断）。
 - **记忆**：文件系统操作，测试时用临时目录。
-- **机制演示**：`tests/mechanism_demo.rs` 三项确定性演示——护栏拦截危险动作、反馈闭环驱动自我修正、护栏管线全流程（重点维度），`cargo test --test mechanism_demo` 一键复现。
+- **机制演示**：`tests/mechanism_demo.rs` 四项确定性演示——护栏拦截危险动作、反馈闭环驱动自我修正、护栏管线全流程（重点维度）、父 agent 委派并汇总子 agent 结果。反馈与委派演示在第二次 LLM 调用前断言对应 Tool 消息已进入上下文，避免脚本响应造成假因果；`cargo test --test mechanism_demo -- --nocapture --test-threads=1` 一键复现。
 - **E2E 验证**：tmux 真终端 + 假 LLM 服务器（127.0.0.1:18999）+ HOME 隔离，端到端验证审批交互、配置分层、会话保存等真实路径（见 AGENT_LOG.md 各条目「验证」节）。
 
 ---
@@ -384,7 +384,7 @@ harnessAgent/
       mod.rs                  # TraceLog
     credentials/
       mod.rs                  # CredentialManager
-      keyring.rs              # KeyringCredentialBackend（预留）
+      keyring.rs              # 系统钥匙串后端 + AES-256-GCM 文件回退
       env.rs                  # EnvCredentialBackend
     tui/
       mod.rs                  # TUI 主入口（run_tui / run_cli / run_event_loop）
@@ -505,7 +505,7 @@ pub struct TraceEntry {
 
 - **主方案**：`auv key set` 使用 OS 钥匙串；不可用时降级到权限为 `0600` 的 AES-256-GCM 加密文件
 - **容器方案**：只读挂载 secret file，设置 `OPENAI_API_KEY_FILE` 为容器内文件路径
-- **兼容方案**：两级配置 `[llm] api_key` 或 `OPENAI_API_KEY`；两者均为明文来源
+- **兼容方案**：两级配置 `[llm] api_key` 或 `OPENAI_API_KEY`；两者均为明文来源，其中配置字段仅为旧版兼容路径
 - **读取优先级**：配置文件 → secret file → 环境变量 → 安全存储
 
 ### 8.2 Key 录入 / 更新 / 清除
@@ -563,7 +563,7 @@ auv key clear OPENAI_API_KEY
 9. **CI 通过**：CI 中 `cargo test` + `cargo build --release` 全部通过
 10. **三种模式交互**：REPL（`auv`）实时显示工具调用与护栏审批；TUI（`auv run`）显示对话/工具/护栏面板且完成后保持打开；纯文本（`auv run --no-tui`）可管道使用
 11. **护栏管线正确性**：沙箱硬校验先于审批（无假批准）、每条动作恰好一条审计记录、拒绝注入反馈回路使 LLM 调整重试
-12. **机制演示**：§A.6 的三项行为在 mock LLM 下可复现（`tests/mechanism_demo.rs`）
+12. **机制演示**：§A.6 的四项行为在 mock LLM 下可复现，反馈与子 agent 演示验证下一轮上下文确实包含前一步结果（`tests/mechanism_demo.rs`）
 13. **会话持久化**：自动保存（模型起名）+ `--resume` 恢复 + 失败路径也保存会话
 
 ---
@@ -572,7 +572,7 @@ auv key clear OPENAI_API_KEY
 
 1. **API 速率限制与费用**：真实 API 调用可能遇到 429 或产生费用。对策：机制演示与全部单测走 mock LLM，真实 API 调用保留但非必需。
 2. **LSP 集成复杂度**：已按计划降级——未实现完整 LSP 协议，诊断信息来自解析 `cargo check` 输出。**（已解决）**
-3. **OS 钥匙串可用性**：Linux 下 Secret Service 不一定可用（无桌面环境）。**（已解决）**：交付版本以配置文件为主方案，钥匙串后端保留为预留。
+3. **OS 钥匙串可用性**：Linux 下 Secret Service 不一定可用（无桌面环境）。**（已解决）**：`auv key set` 优先使用系统钥匙串，不可用时降级到权限 `0600` 的 AES-256-GCM 文件；容器推荐只读 secret file。明文配置字段仅保留兼容读取。
 4. **子 agent 递归深度**：fork 炸弹风险。对策：硬编码深度上限 + 总 agent 数上限。**（已实现）**
 5. **MCP 客户端**：未实现，维持 stretch goal。
 6. **审批交互可靠性**（实现期新增风险）：审批读取与 rustyline 竞争 stdin、Ctrl+C 杀死进程、超时后输入错位、DECSC/DECRC 光标舞步在并发输出下不可靠。对策：可取消轮询读取（`libc::poll` + 50ms 轮询）、`tokio::select!` 三分支（Ctrl+C 监听/超时/读 stdin）、全屏重绘代替光标舞步，并加回归测试禁止舞步转义。**（已解决）**

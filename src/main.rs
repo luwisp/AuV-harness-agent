@@ -1655,7 +1655,7 @@ fn print_notices(notices: &[String]) {
 // resolve_api_key
 // ============================================================================
 
-/// Resolve the API key from config, environment, then secure credential storage.
+/// Resolve the API key while retaining legacy plaintext-source compatibility.
 async fn resolve_api_key(config: &HarnessConfig) -> Result<String> {
     if let Some(key) = resolve_api_key_without_vault(config)? {
         return Ok(key);
@@ -1677,15 +1677,19 @@ async fn resolve_api_key_with_manager(
         }
     }
     Err(harness_agent::error::HarnessError::Auth(
-        "No API key found. Set it in config.toml under [llm].api_key, \
-         set OPENAI_API_KEY_FILE or OPENAI_API_KEY, \
-         Run `auv key set` and use the name OPENAI_API_KEY to store it securely."
+        "No API key found. Run `auv key set` and use the name OPENAI_API_KEY, \
+         or set OPENAI_API_KEY_FILE / OPENAI_API_KEY. The legacy \
+         config.toml [llm].api_key field is plaintext and is not recommended."
             .to_string(),
     ))
 }
 
 fn resolve_api_key_without_vault(config: &HarnessConfig) -> Result<Option<String>> {
     if let Some(ref key) = config.llm.api_key {
+        eprintln!(
+            "警告：正在使用 config.toml 中的明文 [llm].api_key；\
+             建议迁移到 `auv key set` 或 OPENAI_API_KEY_FILE。"
+        );
         return Ok(Some(key.clone()));
     }
     if let Ok(path) = std::env::var("OPENAI_API_KEY_FILE") {
@@ -1971,6 +1975,14 @@ fn build_agent(
 // run_init
 // ============================================================================
 
+fn write_init_config(path: &std::path::Path, is_global: bool) -> Result<()> {
+    if is_global {
+        harness_agent::config::write_default_config(path)
+    } else {
+        harness_agent::config::write_project_override_config(path)
+    }
+}
+
 async fn run_init() -> Result<()> {
     use std::io::{self, Write};
 
@@ -1984,6 +1996,7 @@ async fn run_init() -> Result<()> {
     } else {
         cwd.join(".AuV").join("config.toml")
     };
+    let is_global = cwd == home;
     if config_path.exists() {
         let mut answer = String::new();
         print!("{} 已存在，是否覆盖？[y/N]: ", config_path.display());
@@ -1993,11 +2006,11 @@ async fn run_init() -> Result<()> {
         if answer != "y" && answer != "yes" {
             println!("跳过配置创建（保留现有配置）。");
         } else {
-            harness_agent::config::write_default_config(&config_path)?;
-            println!("已写入默认配置：{}", config_path.display());
+            write_init_config(&config_path, is_global)?;
+            println!("已写入配置模板：{}", config_path.display());
         }
     } else {
-        harness_agent::config::write_default_config(&config_path)?;
+        write_init_config(&config_path, is_global)?;
         println!("已创建配置：{}", config_path.display());
     }
 
@@ -2757,6 +2770,21 @@ mod tests {
         // Verify it can be parsed back
         let config = HarnessConfig::from_file(&config_path).unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_write_init_project_config_is_sparse() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".AuV/config.toml");
+
+        write_init_config(&config_path, false).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let value: toml::Value = toml::from_str(&content).unwrap();
+        assert!(
+            value.as_table().is_some_and(toml::map::Map::is_empty),
+            "项目初始化模板不得包含会遮蔽全局配置的生效字段：{content}"
+        );
     }
 
     // -----------------------------------------------------------------------
