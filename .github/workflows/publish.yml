@@ -24,6 +24,15 @@ jobs:
         with:
           toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
+      - name: Verify release tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "harnessAgent") | .version')"
+          if [[ "v${package_version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not match Cargo package version v${package_version}"
+            exit 1
+          fi
       - name: Run all targets
         run: bash .github/scripts/run-cargo-test.sh cargo test --all-targets --locked -- --test-threads=1
       - name: Run documentation tests

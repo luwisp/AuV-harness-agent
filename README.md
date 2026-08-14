@@ -1,6 +1,6 @@
 # AuV harness agent — Coding Agent Harness
 
-AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent Harness）：主循环、工具分发、四层治理护栏、反馈闭环、记忆与子 agent 委派均为自研 harness 内核，不依赖任何现成 agent 框架。全部核心机制由 mock LLM 驱动、可离线确定性测试（当前 480 项测试全通过、零编译警告），并配有一键复现的机制演示。支持交互式 REPL、可视化 TUI、纯文本三种运行方式。
+AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent Harness）：主循环、工具分发、四层治理护栏、反馈闭环、记忆与子 agent 委派均为自研 harness 内核，不依赖任何现成 agent 框架。全部核心机制由 mock LLM 驱动、可离线确定性测试（当前 482 项测试全通过、零编译警告），并配有一键复现的机制演示。支持交互式 REPL、可视化 TUI、纯文本三种运行方式。
 
 **核心机制速览**
 
@@ -34,7 +34,7 @@ AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent 
 
 | 环境与目的 | 推荐路线 | 需要预装 |
 |------------|----------|----------|
-| Windows 10/11 x86_64 | [Docker Desktop](#windows--docker-desktop) | Docker Desktop（Linux 容器模式） |
+| Windows 10/11 x86_64 简单体验 | [Docker Desktop](#windows--docker-desktop) | Docker Desktop（Linux 容器模式） |
 | Linux x86_64，直接使用 | [Release 二进制](#linux--release-二进制推荐) | `curl`、`sha256sum` |
 | Linux x86_64，隔离试用 | [Docker](#linux--docker) | Docker |
 | Linux，开发 AuV 本身 | [源码编译](#linux--源码编译) | Git、Rust 1.88+ |
@@ -43,7 +43,9 @@ Docker 镜像不含 Rust 工具链。如果希望 AuV 在 Rust 项目中运行 `
 
 ### Windows + Docker Desktop
 
-这是 Windows 当前支持且最省事的路线。请确认 Docker Desktop 正在使用 Linux 容器，然后在 PowerShell 中进入希望 AuV 操作的项目目录：
+这是 Windows 除wsl当前支持且最省事的路线。但由于docker的原因auv无法调用虚拟机外部工具，仅供参考。除此之外，window可以考虑在wsl中使用以获得完整体验。
+
+请确认 Docker Desktop 正在使用 Linux 容器，然后在 PowerShell 中进入希望 AuV 操作的项目目录：
 
 ```powershell
 Set-Location C:\path\to\your-project
@@ -56,12 +58,12 @@ New-Item -ItemType Directory -Force $KeyDir | Out-Null
 if (-not (Test-Path $KeyFile)) { New-Item -ItemType File $KeyFile | Out-Null }
 notepad $KeyFile
 
-docker pull ghcr.io/luwisp/auv-harness-agent:0.1.1
+docker pull ghcr.io/luwisp/auv-harness-agent:0.1.2
 docker run --rm -it `
   --mount "type=bind,source=$Workspace,target=/workspace" `
   --mount "type=bind,source=$KeyFile,target=/run/secrets/openai_api_key,readonly" `
   --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key `
-  ghcr.io/luwisp/auv-harness-agent:0.1.1
+  ghcr.io/luwisp/auv-harness-agent:0.1.2
 ```
 
 上面的命令进入交互式 REPL，项目配置、会话和审计记录保存在当前项目的 `.AuV/`。不要把 key 直接写在 `docker run -e OPENAI_API_KEY=...` 中，否则容易进入 PowerShell 历史。
@@ -85,10 +87,10 @@ base_url = "https://api.deepseek.com/v1"
 
 ### Linux + Release 二进制（推荐）
 
-[v0.1.1 Release](https://github.com/luwisp/AuV-harness-agent/releases/tag/v0.1.1) 提供 Linux x86_64 GNU 二进制和 SHA-256 校验文件（未做代码签名）：
+[v0.1.2 Release](https://github.com/luwisp/AuV-harness-agent/releases/tag/v0.1.2) 提供 Linux x86_64 GNU 二进制和 SHA-256 校验文件（未做代码签名）：
 
 ```bash
-VERSION=v0.1.1
+VERSION=v0.1.2
 curl -fLO "https://github.com/luwisp/AuV-harness-agent/releases/download/${VERSION}/auv-${VERSION}-x86_64-unknown-linux-gnu"
 curl -fLO "https://github.com/luwisp/AuV-harness-agent/releases/download/${VERSION}/auv-${VERSION}-SHA256SUMS"
 sha256sum -c "auv-${VERSION}-SHA256SUMS"
@@ -131,7 +133,7 @@ docker run --rm -it \
   --mount "type=bind,source=$(pwd),target=/workspace" \
   --mount "type=bind,source=$KEY_FILE,target=/run/secrets/openai_api_key,readonly" \
   --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
-  ghcr.io/luwisp/auv-harness-agent:0.1.1
+  ghcr.io/luwisp/auv-harness-agent:0.1.2
 ```
 
 访问宿主机 Ollama 时还需添加 `--network host`。也可以在仓库根目录运行 `docker build -t auv-harness-agent .` 本地构建，并把镜像名替换为 `auv-harness-agent`。

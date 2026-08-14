@@ -46,7 +46,7 @@ use harness_agent::types::{Message, Role, ToolCall};
 #[derive(Parser, Debug)]
 #[command(
     name = "auv",
-    version = "0.1.0",
+    version,
     about = "AuV harness agent - AI 编码代理",
     long_about = "带护栏、工具执行与反馈回路的 AI 编码代理（AuV harness agent）"
 )]
@@ -162,7 +162,15 @@ async fn main() -> Result<()> {
                     &workspace,
                     SubagentApproval::InBandStdin,
                 );
-                let agent = build_agent(&config, &api_key, workspace, None, None, Some(subagent))?;
+                let agent = build_agent(
+                    &config,
+                    &api_key,
+                    workspace,
+                    None,
+                    None,
+                    AgentScope::Root,
+                    Some(subagent),
+                )?;
                 run_cli(agent, task).await
             } else {
                 // TUI mode — event channel for live updates, plus a decision
@@ -181,7 +189,15 @@ async fn main() -> Result<()> {
                         label: "子 agent".to_string(),
                     },
                 );
-                let agent = build_agent(&config, &api_key, workspace, Some(tx), Some(decision_rx), Some(subagent))?;
+                let agent = build_agent(
+                    &config,
+                    &api_key,
+                    workspace,
+                    Some(tx),
+                    Some(decision_rx),
+                    AgentScope::Root,
+                    Some(subagent),
+                )?;
                 let model = config.llm.model.clone();
                 run_tui(agent, task, rx, decision_tx, model).await
             }
@@ -431,6 +447,7 @@ async fn run_repl(
         workspace.clone(),
         Some(tx.clone()),
         Some(decision_rx),
+        AgentScope::Root,
         Some(subagent),
     )?;
     let approval_timeout = Duration::from_secs(config.guardrails.approval_timeout_secs);
@@ -715,6 +732,7 @@ async fn run_repl(
                         workspace.clone(),
                         Some(tx.clone()),
                         Some(new_drx),
+                        AgentScope::Root,
                         Some(new_subagent),
                     ) {
                         Ok(new_agent) => {
@@ -1224,8 +1242,15 @@ fn view_message(conversation: &[Message], index: usize) -> std::result::Result<S
 }
 
 /// 打印启动横幅。
+fn repl_banner_line() -> String {
+    format!(
+        "\x1b[36;1mAuV harness agent\x1b[0m REPL v{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn print_banner() {
-    println!("\x1b[36;1mAuV harness agent\x1b[0m REPL v0.1.0");
+    println!("{}", repl_banner_line());
     println!("输入任务开始对话，/help 查看命令，/exit 退出");
 }
 
@@ -1723,9 +1748,15 @@ fn resolve_api_key_without_vault(config: &HarnessConfig) -> Result<Option<String
 /// `event_tx` is an optional sender for progress events. Pass `None` for
 /// headless / batch usage, or a channel sender for TUI/REPL modes.
 ///
-/// `decision_rx` 启用审批门的 UI 事件模式（TUI）：审批请求以事件发给 UI，
-/// 决定通过该通道返回；`None` 时审批门在 stdin 上交互（REPL / 纯文本）。
+/// `decision_rx` 启用根 agent 的 UI 事件模式（REPL / TUI）：审批请求以事件
+/// 发给 UI，决定通过该通道返回；`None` 时根 agent 在 stdin 上交互。
 /// 子 agent 生产装配：spawner + 审批路由方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentScope {
+    Root,
+    Child,
+}
+
 struct SubagentWiring {
     spawner: std::sync::Arc<SubagentSpawner>,
     approval: SubagentApproval,
@@ -1755,6 +1786,7 @@ fn build_subagent_wiring(
             factory_workspace.clone(),
             None,
             None,
+            AgentScope::Child,
             Some(SubagentWiring {
                 spawner: child_spawner,
                 approval: factory_approval.clone(),
@@ -1778,6 +1810,7 @@ fn build_agent(
     workspace: PathBuf,
     event_tx: Option<mpsc::Sender<AgentEvent>>,
     decision_rx: Option<mpsc::Receiver<ApprovalDecision>>,
+    scope: AgentScope,
     subagent: Option<SubagentWiring>,
 ) -> Result<AgentLoop> {
     // 1. LLM provider
@@ -1802,9 +1835,11 @@ fn build_agent(
     };
 
     let approval_timeout = Duration::from_secs(config.guardrails.approval_timeout_secs);
-    let approval = match (&subagent, decision_rx) {
-        // 子 loop：审批路由由装配的 SubagentApproval 决定，不经父决策通道
-        (Some(wiring), _) => match &wiring.approval {
+    let approval = match (scope, &subagent, decision_rx) {
+        // 子 loop：审批路由由装配的 SubagentApproval 决定，不经父决策通道。
+        // 是否为子 loop 必须由 scope 明确表达；根 loop 同样会携带 wiring
+        // 来注册 subagent 工具，不能据此推断自身身份。
+        (AgentScope::Child, Some(wiring), _) => match &wiring.approval {
             SubagentApproval::InBandStdin => {
                 ApprovalGate::new_with_context(approval_timeout, Some("子 agent"))
             }
@@ -1822,18 +1857,23 @@ fn build_agent(
                 )
             }
         },
-        // TUI 模式（父 loop）：stdin 被 crossterm raw mode 接管，审批通过事件通道
-        // 交给 TUI 面板，y/n 按键决定经 decision_rx 返回
-        (None, Some(decision_rx)) => {
+        (AgentScope::Child, None, _) => {
+            return Err(harness_agent::error::HarnessError::Config(
+                "子 agent 缺少递归委派与审批装配".to_string(),
+            ));
+        }
+        // REPL / TUI 根 loop：审批通过事件通道交给前台界面，y/n 决定经
+        // decision_rx 返回。是否注册 subagent 工具不改变根 loop 的路由。
+        (AgentScope::Root, _, Some(decision_rx)) => {
             let event_tx = event_tx.clone().ok_or_else(|| {
                 harness_agent::error::HarnessError::Config(
-                    "TUI 审批模式需要事件通道".to_string(),
+                    "UI 审批模式需要事件通道".to_string(),
                 )
             })?;
             ApprovalGate::with_ui_events(approval_timeout, event_tx, decision_rx)
         }
-        // REPL / 纯文本模式（父 loop）：stdin 交互审批
-        (None, None) => ApprovalGate::new(approval_timeout),
+        // 纯文本根 loop：stdin 交互审批。
+        (AgentScope::Root, _, None) => ApprovalGate::new(approval_timeout),
     };
     let sandbox = SandboxBoundary {
         workspace_root: workspace.clone(),
@@ -2078,10 +2118,13 @@ async fn run_key_clear(key: &str) -> Result<()> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use harness_agent::credentials::CredentialBackend;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// 进程环境变量（OPENAI_API_KEY / OPENAI_API_KEY_FILE）是共享可变状态，
     /// 串行化所有 set_var/remove_var 的测试，消除并行竞态。
@@ -2089,6 +2132,19 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn test_user_visible_versions_match_package_version() {
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "--version 必须来自 Cargo.toml"
+        );
+        assert!(
+            repl_banner_line().ends_with(&format!("REPL v{}", env!("CARGO_PKG_VERSION"))),
+            "REPL 横幅必须来自 Cargo.toml"
+        );
     }
 
     struct TestCredentialBackend {
@@ -2662,7 +2718,15 @@ mod tests {
     fn test_build_agent_with_default_config() {
         let config = HarnessConfig::default();
         let workspace = PathBuf::from("/tmp/test-workspace");
-        let agent = build_agent(&config, "sk-test-key", workspace, None, None, None);
+        let agent = build_agent(
+            &config,
+            "sk-test-key",
+            workspace,
+            None,
+            None,
+            AgentScope::Root,
+            None,
+        );
         assert!(agent.is_ok(), "build_agent should succeed: {:?}", agent.err());
     }
 
@@ -2673,8 +2737,95 @@ mod tests {
         let workspace = PathBuf::from("/tmp/test-workspace");
         let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
         let (_dtx, decision_rx) = mpsc::channel::<ApprovalDecision>(4);
-        let agent = build_agent(&config, "sk-test-key", workspace, Some(tx), Some(decision_rx), None);
+        let agent = build_agent(
+            &config,
+            "sk-test-key",
+            workspace,
+            Some(tx),
+            Some(decision_rx),
+            AgentScope::Root,
+            None,
+        );
         assert!(agent.is_ok(), "build_agent should succeed: {:?}", agent.err());
+    }
+
+    #[tokio::test]
+    async fn test_root_agent_with_subagent_tool_uses_parent_ui_approval_route() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "message": {
+                        "content": "准备执行命令",
+                        "tool_calls": [{
+                            "id": "call-risky",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": "{\"command\":\"echo x | cat > out.txt\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = HarnessConfig::default();
+        config.llm.base_url = Some(mock_server.uri());
+        config.agent.max_turns = 1;
+        config.feedback.enabled = false;
+        config.memory.storage_path = workspace.path().join(".AuV/memory");
+        config.guardrails.audit_log_path = workspace.path().join(".AuV/audit.jsonl");
+        config.guardrails.approval_timeout_secs = 1;
+
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(16);
+        let (decision_tx, decision_rx) = mpsc::channel::<ApprovalDecision>(4);
+        let wiring = build_subagent_wiring(
+            &config,
+            "sk-test-key",
+            &workspace.path().to_path_buf(),
+            SubagentApproval::InBandStdin,
+        );
+        let mut agent = build_agent(
+            &config,
+            "sk-test-key",
+            workspace.path().to_path_buf(),
+            Some(event_tx),
+            Some(decision_rx),
+            AgentScope::Root,
+            Some(wiring),
+        )
+        .unwrap();
+
+        let run = tokio::spawn(async move { agent.run("测试审批路由").await });
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(event @ AgentEvent::GuardrailApprovalNeeded { .. }) => break event,
+                    Some(AgentEvent::SubagentApprovalNeeded { .. }) => {
+                        panic!("主 agent 的审批不能标记为子 agent")
+                    }
+                    Some(_) => {}
+                    None => panic!("事件通道关闭前未收到主 agent 审批事件"),
+                }
+            }
+        })
+        .await
+        .expect("主 agent 应在超时前发出审批事件");
+
+        assert!(matches!(event, AgentEvent::GuardrailApprovalNeeded { .. }));
+        decision_tx
+            .send(ApprovalDecision::Denied {
+                reason: "测试拒绝".to_string(),
+            })
+            .await
+            .unwrap();
+        let _ = run.await.unwrap();
     }
 
     #[test]
@@ -2682,7 +2833,16 @@ mod tests {
         let mut config = HarnessConfig::default();
         config.tools.disabled_tools = vec!["bash".to_string(), "grep".to_string()];
         let workspace = PathBuf::from("/tmp/test-workspace");
-        let agent = build_agent(&config, "sk-test-key", workspace, None, None, None).unwrap();
+        let agent = build_agent(
+            &config,
+            "sk-test-key",
+            workspace,
+            None,
+            None,
+            AgentScope::Root,
+            None,
+        )
+        .unwrap();
 
         let tool_names = agent.tools().names();
         assert!(!tool_names.contains(&"bash".to_string()), "bash 应被禁用");
@@ -2706,6 +2866,7 @@ mod tests {
             workspace,
             None,
             None,
+            AgentScope::Root,
             Some(wiring),
         )
         .unwrap();
@@ -2719,7 +2880,16 @@ mod tests {
     fn test_build_agent_without_wiring_skips_subagent_tool() {
         let config = HarnessConfig::default();
         let workspace = PathBuf::from("/tmp/test-workspace");
-        let agent = build_agent(&config, "sk-test-key", workspace, None, None, None).unwrap();
+        let agent = build_agent(
+            &config,
+            "sk-test-key",
+            workspace,
+            None,
+            None,
+            AgentScope::Root,
+            None,
+        )
+        .unwrap();
         assert!(
             !agent.tools().names().contains(&"subagent".to_string()),
             "无 wiring 时不应注册 subagent 工具"
@@ -2743,6 +2913,7 @@ mod tests {
             workspace,
             None,
             None,
+            AgentScope::Root,
             Some(wiring),
         )
         .unwrap();
