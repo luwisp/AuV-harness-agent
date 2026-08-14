@@ -30,74 +30,123 @@ AuV 是一个用 Rust 从零实现的编码智能体执行框架（Coding Agent 
 
 ## 快速开始
 
-### 前置条件
+先准备一个 OpenAI 兼容 API 的 key（OpenAI、DeepSeek 等均可），再按系统选择路线：
 
-- Rust 1.88+（edition 2024；当前锁文件中的依赖要求至少 1.88）
-- 一个 OpenAI 兼容 API 的 key（OpenAI、DeepSeek 等均可）
+| 环境与目的 | 推荐路线 | 需要预装 |
+|------------|----------|----------|
+| Windows 10/11 x86_64 | [Docker Desktop](#windows--docker-desktop) | Docker Desktop（Linux 容器模式） |
+| Linux x86_64，直接使用 | [Release 二进制](#linux--release-二进制推荐) | `curl`、`sha256sum` |
+| Linux x86_64，隔离试用 | [Docker](#linux--docker) | Docker |
+| Linux，开发 AuV 本身 | [源码编译](#linux--源码编译) | Git、Rust 1.88+ |
 
-### 从源码三步启动
+Docker 镜像不含 Rust 工具链。如果希望 AuV 在 Rust 项目中运行 `cargo test/check/clippy`，Linux 下优先选择 Release 二进制或源码编译。
+
+### Windows + Docker Desktop
+
+这是 Windows 当前支持且最省事的路线。请确认 Docker Desktop 正在使用 Linux 容器，然后在 PowerShell 中进入希望 AuV 操作的项目目录：
+
+```powershell
+Set-Location C:\path\to\your-project
+$Workspace = (Get-Location).Path
+
+# 创建只存放 key 的文件；随后在记事本中填入 key 并保存。
+$KeyDir = Join-Path $HOME ".config\auv"
+$KeyFile = Join-Path $KeyDir "openai-api-key"
+New-Item -ItemType Directory -Force $KeyDir | Out-Null
+if (-not (Test-Path $KeyFile)) { New-Item -ItemType File $KeyFile | Out-Null }
+notepad $KeyFile
+
+docker pull ghcr.io/luwisp/auv-harness-agent:0.1.1
+docker run --rm -it `
+  --mount "type=bind,source=$Workspace,target=/workspace" `
+  --mount "type=bind,source=$KeyFile,target=/run/secrets/openai_api_key,readonly" `
+  --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key `
+  ghcr.io/luwisp/auv-harness-agent:0.1.1
+```
+
+上面的命令进入交互式 REPL，项目配置、会话和审计记录保存在当前项目的 `.AuV/`。不要把 key 直接写在 `docker run -e OPENAI_API_KEY=...` 中，否则容易进入 PowerShell 历史。
+
+使用 DeepSeek 等兼容服务时，先创建并编辑项目配置：
+
+```powershell
+New-Item -ItemType Directory -Force .AuV | Out-Null
+notepad .AuV\config.toml
+```
+
+例如 DeepSeek 配置为：
+
+```toml
+[llm]
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com/v1"
+```
+
+再次执行上面的 `docker run` 即可。Docker Desktop 中访问宿主机 Ollama 时，请把配置中的 `localhost` 改为 `host.docker.internal`。
+
+### Linux + Release 二进制（推荐）
+
+[v0.1.1 Release](https://github.com/luwisp/AuV-harness-agent/releases/tag/v0.1.1) 提供 Linux x86_64 GNU 二进制和 SHA-256 校验文件（未做代码签名）：
 
 ```bash
-# 1. 获取并编译
+VERSION=v0.1.1
+curl -fLO "https://github.com/luwisp/AuV-harness-agent/releases/download/${VERSION}/auv-${VERSION}-x86_64-unknown-linux-gnu"
+curl -fLO "https://github.com/luwisp/AuV-harness-agent/releases/download/${VERSION}/auv-${VERSION}-SHA256SUMS"
+sha256sum -c "auv-${VERSION}-SHA256SUMS"
+
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "auv-${VERSION}-x86_64-unknown-linux-gnu" "$HOME/.local/bin/auv"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+然后进入希望 AuV 操作的项目，完成初始化并启动 REPL：
+
+```bash
+cd /path/to/your-project
+auv init
+auv
+```
+
+`auv init` 会创建配置并用隐藏回显引导录入 key。DeepSeek、Groq、Ollama 等服务还需在启动前向 `./.AuV/config.toml` 添加 `model` 与 `base_url`，见[使用兼容 API](#使用兼容-api-deepseek--groq--ollama--vllm)。单次任务也可以运行：
+
+```bash
+auv run "运行 cargo test 并修复失败的测试"
+```
+
+### Linux + Docker
+
+容器中推荐挂载只读 secret file。命令显式使用当前用户的 UID/GID，避免宿主 key 权限为 `0600` 时容器用户无法读取：
+
+```bash
+KEY_FILE="$HOME/.config/auv/openai-api-key"
+mkdir -p "$(dirname "$KEY_FILE")"
+chmod 700 "$(dirname "$KEY_FILE")"
+touch "$KEY_FILE"
+chmod 600 "$KEY_FILE"
+${EDITOR:-vi} "$KEY_FILE"
+
+docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/workspace \
+  --env XDG_CONFIG_HOME=/workspace/.AuV \
+  --mount "type=bind,source=$(pwd),target=/workspace" \
+  --mount "type=bind,source=$KEY_FILE,target=/run/secrets/openai_api_key,readonly" \
+  --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
+  ghcr.io/luwisp/auv-harness-agent:0.1.1
+```
+
+访问宿主机 Ollama 时还需添加 `--network host`。也可以在仓库根目录运行 `docker build -t auv-harness-agent .` 本地构建，并把镜像名替换为 `auv-harness-agent`。
+
+### Linux + 源码编译
+
+```bash
 git clone https://github.com/luwisp/AuV-harness-agent.git
 cd AuV-harness-agent
 cargo build --release --locked
-
-# 2. 初始化（首次运行：创建配置 + 引导录入 key，隐藏回显）
 ./target/release/auv init
-
-# 3. 开始使用（进入交互式 REPL）
 ./target/release/auv
 ```
 
-DeepSeek、Groq、Ollama 等兼容服务还需在第 3 步前向 `./.AuV/config.toml` 添加对应的 `model` 与 `base_url`，见[使用兼容 API](#使用兼容-api-deepseek--groq--ollama--vllm)。项目模板默认不覆盖全局配置。
-
-单次任务也可以直接一句话：
-
-```bash
-./target/release/auv run "运行 cargo test 并修复失败的测试"
-```
-
-### Docker
-
-直接使用已发布的 GHCR 镜像（`0.1.0` 为固定版本；`latest` 随 `v*` Release 标签更新）：
-
-```bash
-docker pull ghcr.io/luwisp/auv-harness-agent:0.1.0
-docker run --rm -it \
-  --mount type=bind,src="$PWD",dst=/workspace \
-  ghcr.io/luwisp/auv-harness-agent:0.1.0
-```
-
-也可以在仓库根目录本地构建：`docker build -t auv-harness-agent .`，并将上面最后一行镜像名替换为 `auv-harness-agent`。
-
-容器中推荐用只读 secret file 提供 key（不把 key 写进镜像、命令行或进程环境）：
-
-```bash
-mkdir -p "$HOME/.config/auv" && chmod 700 "$HOME/.config/auv"
-touch "$HOME/.config/auv/openai-api-key" && chmod 600 "$HOME/.config/auv/openai-api-key"
-# 用编辑器把 key 写入上面的文件，不要在命令行中直接写 key。
-
-docker run --rm -it \
-  --mount type=bind,src="$PWD",dst=/workspace \
-  --mount type=bind,src="$HOME/.config/auv/openai-api-key",dst=/run/secrets/openai_api_key,readonly \
-  -e OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
-  ghcr.io/luwisp/auv-harness-agent:0.1.0
-```
-
-访问宿主机 Ollama 时，Linux Docker 还需加 `--network host`；Docker Desktop 请把 `base_url` 中的 `localhost` 改为 `host.docker.internal`。
-
-### GitHub Release 二进制
-
-[v0.1.0 Release](https://github.com/luwisp/AuV-harness-agent/releases/tag/v0.1.0) 已提供 Linux x86_64 GNU 二进制及 SHA-256 校验文件（未做代码签名）：
-
-```bash
-curl -LO https://github.com/luwisp/AuV-harness-agent/releases/download/v0.1.0/auv-v0.1.0-x86_64-unknown-linux-gnu
-curl -LO https://github.com/luwisp/AuV-harness-agent/releases/download/v0.1.0/auv-v0.1.0-SHA256SUMS
-sha256sum -c auv-v0.1.0-SHA256SUMS
-chmod +x auv-v0.1.0-x86_64-unknown-linux-gnu
-./auv-v0.1.0-x86_64-unknown-linux-gnu --version
-```
+源码构建要求 Rust 1.88+（edition 2024；当前锁文件中的依赖要求至少 1.88）。
 
 ---
 
@@ -385,7 +434,7 @@ cargo build --release
 - **LSP 诊断**：降级为解析 `cargo check` 输出，未实现完整 LSP 协议。
 - **Linux 钥匙串**：需 `gnome-keyring` 或 `kwallet`，无桌面环境自动降级到加密文件。
 - **加密文件回退**：使用 machine-id 派生密钥且文件权限为 `0600`，主要防止意外明文泄漏，不等价于带独立主密码的凭据库。
-- **平台**：主要测试 Linux x86_64；macOS ARM64 可编译但未充分测试。
+- **平台**：原生二进制主要测试 Linux x86_64；Windows 10/11 x86_64 通过 Docker Desktop 的 Linux 容器运行。当前不提供 Windows 原生二进制，也暂不提供 macOS 上手路线。
 - **容器平台**：发布流水线当前只构建 `linux/amd64`；运行镜像约 45 MB，不包含 Rust 或其他项目语言工具链。Agent 可执行 shell/git 与基础文件操作，但 `cargo test/check/clippy` 反馈需要在自定义派生镜像中安装 Rust，或使用原生二进制运行。
 - **容器凭据**：容器无桌面 Secret Service，推荐只读挂载 secret file；把 `OPENAI_API_KEY` 直接写在 `docker run -e` 后会进入 shell history，应避免。
 - **二进制签名**：GitHub Release 的 Linux 二进制当前未签名，只提供 SHA-256 校验文件。
